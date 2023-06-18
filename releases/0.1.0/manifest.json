@@ -1,0 +1,10 @@
+{
+	"id": "edit-history",
+	"name": "Edit History",
+	"version": "0.1.0",
+	"minAppVersion": "0.15.0",
+	"description": "Edit history plugin for Obsidian, automatically saves the history of edits of a file when Obsidian saves the file, and allows viewing the differences between edits, copying text from a previous edit, or fully rolling back to a previous edit.",
+	"author": "Antonio Tejada",
+	"authorUrl": "https://github.com/antoniotejada/",
+	"isDesktopOnly": false
+}

@@ -1,0 +1,28 @@
+{
+	"name": "edit-history",
+	"version": "0.1.0",
+	"description": "Edit history plugin for Obsidian http://obsidian.md, automatically saves the history of edits of a file when Obsidian saves the file, and allows viewing the differences between edits, copying text from a previous edit, or fully rolling back to a previous edit.",
+	"main": "main.js",
+	"scripts": {
+		"dev": "node esbuild.config.mjs",
+		"build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production",
+		"version": "node version-bump.mjs && git add manifest.json versions.json"
+	},
+	"dependencies": {
+		"diff-match-patch-ts": "latest",
+		"jszip": "3.10.1"
+	},
+	"keywords": [],
+	"author": "",
+	"license": "AGPL3",
+	"devDependencies": {
+		"@types/node": "^16.11.6",
+		"@typescript-eslint/eslint-plugin": "5.29.0",
+		"@typescript-eslint/parser": "5.29.0",
+		"builtin-modules": "3.3.0",
+		"esbuild": "0.17.3",
+		"obsidian": "latest",
+		"tslib": "2.4.0",
+		"typescript": "4.7.4"
+	}
+}
