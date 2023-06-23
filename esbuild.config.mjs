@@ -81,7 +81,7 @@ const context = await esbuild.context({
     outfile: "main.js",
 });
 
-let artifacts = ["main.js", "manifest.json"];
+let artifacts = ["main.js", "manifest.json", "styles.css"];
 
 if (prod) {
     let buildResult = await context.rebuild();

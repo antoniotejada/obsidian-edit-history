@@ -4,6 +4,40 @@ import { DiffMatchPatch } from "diff-match-patch-ts";
 // is the recommended way
 import JSZip from "jszip";
 
+
+// Debuglevels in increasing severity so messages >= indexOf(debugLevel) will be
+// shown
+const debugLevels = ["debug", "info", "warn", "error"];
+
+let logError = function(message?: any, ...optionalParams: any[]) {};
+let logWarn = function(message?: any, ...optionalParams: any[]) {};
+// Note console.log is an alias of console.info
+let logInfo = function(message?: any, ...optionalParams: any[]) {};
+let logDbg = function(message?: any, ...optionalParams: any[]) {};
+
+function hookLogFunctions(debugLevelIndex: number, tag: string) {
+    logInfo("hookLogFunctions", debugLevelIndex, tag);
+
+    const logIgnore = function(message?: any, ...optionalParams: any[]) {};
+    logError = (debugLevelIndex <= debugLevels.indexOf("error")) ? 
+        console.error.bind(console, tag + "[ERROR]:") :
+        logIgnore;
+    logWarn = (debugLevelIndex <= debugLevels.indexOf("warn")) ?
+        console.warn.bind(console, tag + "[WARN]:") :
+        logIgnore;
+    logInfo = (debugLevelIndex <= debugLevels.indexOf("info")) ?
+        console.info.bind(console, tag + "[INFO]:") :
+        logIgnore;
+    logDbg = (debugLevelIndex <= debugLevels.indexOf("debug")) ?
+        console.debug.bind(console, tag + "[DEBUG]:") :
+        logIgnore;
+}
+
+function debugbreak() {
+    debugger;
+}
+
+
 interface EditHistorySettings {
     minSecondsBetweenEdits: string;
     maxEdits: string;
@@ -12,6 +46,7 @@ interface EditHistorySettings {
     editHistoryRootFolder: string;
     extensionWhitelist: string;
     showOnStatusBar: boolean;
+    debugLevel: string;
     // XXX Have color setting for addition fore/back, deletion fore/back 
 }
 
@@ -22,7 +57,8 @@ const DEFAULT_SETTINGS: EditHistorySettings = {
     maxHistoryFileSizeKB: "0",
     editHistoryRootFolder: "",
     extensionWhitelist: ".md, .txt, .csv, .htm, .html",
-    showOnStatusBar: true
+    showOnStatusBar: true,
+    debugLevel: "warn"
 }
 
 const EDIT_HISTORY_FILE_EXT = ".edtz";
@@ -124,14 +160,17 @@ export default class EditHistory extends Plugin {
     /**
      * Sort in place
      */
-    sortEdits(filenames: string[], descending : boolean = true) {
+    sortEdits(filenames: string[], descending: boolean = true) {
         const i = descending ? 1 : -1; 
 
         filenames.sort((a,b) => i * (this.getEditEpoch(b) - this.getEditEpoch(a)));
     }
 
     parseSettings(settings: EditHistorySettings) {
-        console.log("parseSettings");
+        // Hook log functions as early as possible so any console output is seen
+        // if enabled
+        hookLogFunctions(debugLevels.indexOf(settings.debugLevel), "EditHistoryPlugin");
+
         this.minMsBetweenEdits = parseInt(settings.minSecondsBetweenEdits) * 1000 || Infinity; 
         this.maxEdits = parseInt(settings.maxEdits) || Infinity;
         this.maxEditAgeMs = parseInt(settings.maxEditAge) * 1000 || Infinity;
@@ -143,7 +182,7 @@ export default class EditHistory extends Plugin {
         //     removed?
         this.extensionWhitelist = extensionWhitelist;
         this.maxEditHistoryFileSize = parseInt(settings.maxHistoryFileSizeKB) * 1024 || Infinity;
-        // XXX Note this is currently not updated in the setting modal, so the
+        // XXX Note this is currently not updated in the settings modal, so the
         //     value is unchanged
         this.editHistoryRootFolder = settings.editHistoryRootFolder;
     }
@@ -159,14 +198,17 @@ export default class EditHistory extends Plugin {
     }
 
     async onload() {
+        // Load settings as early as possible console output is seen if enabled
         await this.loadSettings();
 
+        logInfo("onLoad");
+
         this.registerEvent(this.app.vault.on("modify", async (fileOrFolder: TAbstractFile, force: boolean = false) => {
-            console.log("vault modify", fileOrFolder.path);
+            logInfo("vault modify", fileOrFolder.path);
             // This reports any files or folders modified via the api, ignore
             // non whitelisted files/folders
             if (!(this.keepEditHistoryForFile(fileOrFolder))) {
-                console.debug("Ignoring non whitelisted file", fileOrFolder.path);
+                logDbg("Ignoring non whitelisted file", fileOrFolder.path);
                 return;
             }
             let file = fileOrFolder as TFile;
@@ -174,7 +216,7 @@ export default class EditHistory extends Plugin {
             let zipFile = this.app.vault.getAbstractFileByPath(zipFilepath);
             if ((zipFile != null) && !(zipFile instanceof TFile)) {
                 // Not a file, error
-                console.error("Edit history file is not a file", zipFilepath);
+                logError("Edit history file is not a file", zipFilepath);
                 return;
             }
 
@@ -183,7 +225,7 @@ export default class EditHistory extends Plugin {
             // XXX Abstract this and remove the force flag?
             if (!force && 
                 (zipFile != null) && ((file.stat.mtime - zipFile.stat.mtime) < this.minMsBetweenEdits)) {
-                console.debug("Need to pass", 
+                logDbg("Need to pass", 
                     (this.minMsBetweenEdits - (file.stat.mtime - zipFile.stat.mtime)) / 1000, "s between edits, ignoring");
                 return;
             }
@@ -209,6 +251,16 @@ export default class EditHistory extends Plugin {
             //   deleted
             // - The history file is still valid even if the original file is
             //   modified from outside Obsidian
+            
+            // XXX Another option that would likely make the Edit History File
+            //     smaller is to do the diffs backwards and store the first
+            //     version fully and build diffs on top of that first version.
+            //     That would make saving slower, though, since it will have to
+            //     rebuild the history from the start on every save, or cache
+            //     that the first time. Would also make trimming the history
+            //     file slightly harder (needs to rebuild the version that will
+            //     now become the first version when older versions are removed
+            //     from the file).
 
             // Load the modified file data
             let fileData = await this.app.vault.read(file);
@@ -248,18 +300,18 @@ export default class EditHistory extends Plugin {
                     // Note there's a new edit incoming, so check max number of
                     // edits for equality too
                     if (filepaths.length >= this.maxEdits) {
-                        console.log("Will purge entry", filepath, "over max count", 
+                        logInfo("Will purge entry", filepath, "over max count", 
                             filepaths.length, ">", this.maxEdits)
                         purge = true;
                     }
                     let filepathAgeMs = todayUTC - this.getEditEpoch(filepath);
                     if (filepathAgeMs > this.maxEditAgeMs) {
-                        console.log("Will purge entry", filepath, "over max age", 
+                        logInfo("Will purge entry", filepath, "over max age", 
                             filepathAgeMs * 1000, ">", this.maxEditAgeMs * 1000);
                         purge = true;
                     }
                     if (zipFileSize > this.maxEditHistoryFileSize) {
-                        console.log("Will purge entry", filepath, "over max size", 
+                        logInfo("Will purge entry", filepath, "over max size", 
                             zipFileSize, ">", this.maxEditHistoryFileSize);
                         // XXX Instead of just purging this could do something
                         //     smarter like merging entries which could also
@@ -275,7 +327,7 @@ export default class EditHistory extends Plugin {
                         // this entry is not purged
                         break;
                     }
-                    console.log("Purging entry", filepath);
+                    logInfo("Purging entry", filepath);
                     filepaths.pop();
                     zip.remove(filepath);
                 }
@@ -309,12 +361,12 @@ export default class EditHistory extends Plugin {
                         // always the case unless there's a forced save.
                         // XXX This could just remove the last change and update
                         //     to this one?
-                        console.log("Delaying entry due to colliding epochs");
+                        logInfo("Delaying entry due to colliding epochs");
                         return;
                     }
                     
                     let dmpobj = new DiffMatchPatch();
-                    console.log("unpacking " + mostRecentFilename);
+                    logInfo("unpacking " + mostRecentFilename);
                     let prevFileData = await mostRecentFile.async("string");
                     // @ts-ignore: complains about missing opt_c, but
                     // passing only two arguments is actually allowed by the
@@ -335,14 +387,14 @@ export default class EditHistory extends Plugin {
                         if (patch.length < prevFileData.length) {
                             // Replace the previous version with a diff wrt the
                             // newest version
-                            console.log("Removing ", mostRecentFilename);
+                            logInfo("Removing ", mostRecentFilename);
                             zip.remove(mostRecentFilename);
                             // Store as a diff
                             mostRecentFilename = this.buildEditFilename(
                                 this.getEditEpoch(mostRecentFilename), 
                                 true
                             );
-                            console.log("Storing ", mostRecentFilename, " with date ", 
+                            logInfo("Storing ", mostRecentFilename, " with date ", 
                                 mostRecentFile.date, " timestamp ", mostRecentFile.extendedTimestamp);
                             // XXX Investigate why there's no need to undo
                             //     the UTC offset here: 
@@ -354,7 +406,7 @@ export default class EditHistory extends Plugin {
                                 { date: mostRecentFile.date, compression:"DEFLATE" });
                         }
                     } else {
-                        console.log("No changes detected, ignoring");
+                        logInfo("No changes detected, ignoring");
                         return;
                     }
                 }  
@@ -382,7 +434,7 @@ export default class EditHistory extends Plugin {
             // see https://opensource.apple.com/source/zip/zip-6/unzip/unzip/proginfo/extra.fld
             // see https://pkware.cachefly.net/webdocs/casestudies/APPNOTE.TXT
             let dateWithOffset = new Date(file.stat.mtime - new Date().getTimezoneOffset() * 60000);
-            console.log("Storing", newFilename, " with date", dateWithOffset);
+            logInfo("Storing", newFilename, " with date", dateWithOffset);
             zip.file(newFilename, fileData, { date: dateWithOffset, compression:"DEFLATE" });
             
             // Generate zip archive and save
@@ -401,11 +453,11 @@ export default class EditHistory extends Plugin {
                 //     - createFolder succeeds in creating a folder starting with "."
                 //     - getAbstractFileByPath of a path starting with "." returns null
                 let dirpath = zipFilepath.substring(0, zipFilepath.lastIndexOf("/")+1);
-                console.log("Conservatively creating dir", dirpath);
+                logInfo("Conservatively creating dir", dirpath);
                 await this.app.vault.createFolder(dirpath).catch(()=>null);
                 let zipFile = await this.app.vault.createBinary(zipFilepath, newZipData);
                 if (zipFile == null) {
-                    console.error("Can't create edit history file", zipFilepath);
+                    logError("Can't create edit history file", zipFilepath);
                     return;
                 }
             } else {
@@ -417,7 +469,7 @@ export default class EditHistory extends Plugin {
         }));
         
         this.registerEvent(this.app.vault.on("rename", (file: TAbstractFile, oldPath: string) => {
-            console.log("vault rename path", file.path);
+            logInfo("vault rename path", file.path);
             // This reports any files or folders modified via the api, ignore
             // non whitelisted files/folders
             // Note if a folder is renamed each children will get a call here
@@ -431,14 +483,14 @@ export default class EditHistory extends Plugin {
                 //     But note the history edit file folder is set to "" for
                 //     the time being, so this code won't run and this is not an
                 //     issue yet
-                console.log("Renaming history folder, updating settings from", 
+                logInfo("Renaming history folder, updating settings from", 
                     this.settings.editHistoryRootFolder, "to", file.path);
                 this.settings.editHistoryRootFolder = file.path;
                 this.saveSettings();
             } 
 
             if (!(this.keepEditHistoryForFile(file))) {
-                console.debug("Ignoring non whitelisted file", file.path);
+                logDbg("Ignoring non whitelisted file", file.path);
                 return;
             }
 
@@ -449,7 +501,7 @@ export default class EditHistory extends Plugin {
             // move the edit history file and finds it's not there anymore.
             if ((this.settings.editHistoryRootFolder == "") && 
                 (oldPath.split("/").pop() == file.name)) {
-                console.debug("Ignoring directory-only change rename");
+                logDbg("Ignoring directory-only change rename");
                 return;
             }
 
@@ -459,24 +511,24 @@ export default class EditHistory extends Plugin {
             let zipFile = this.app.vault.getAbstractFileByPath(zipFilepath);
             if (zipFile != null) {
                 let newZipFilepath = this.getEditHistoryFilepath(file.path);
-                console.log("Renaming edit history file", zipFilepath,"to", newZipFilepath);
+                logInfo("Renaming edit history file", zipFilepath,"to", newZipFilepath);
                 this.app.vault.rename(zipFile, newZipFilepath);
             }
         }));
 
         this.registerEvent(this.app.vault.on("delete", (file: TAbstractFile) => {
-            console.log("vault delete path", file.path);
+            logInfo("vault delete path", file.path);
             // This reports any files or folders modified via the api, ignore
             // non whitelisted files/folders
             if (!(this.keepEditHistoryForFile(file))) {
-                console.debug("Ignoring non whitelisted file", file.path);
+                logDbg("Ignoring non whitelisted file", file.path);
                 return;
             }
             // Delete the edit history file if any
             let zipFilepath = this.getEditHistoryFilepath(file.path);
             let zipFile = this.app.vault.getAbstractFileByPath(zipFilepath);
             if (zipFile != null) {
-                console.log("Deleting edit history file", zipFilepath);
+                logInfo("Deleting edit history file", zipFilepath);
                 // XXX Should this trash instead of delete? (the Obsidian
                 //     setting under Files and Links allows choosing between
                 //     system trash, obsidian trash and delete)
@@ -488,7 +540,7 @@ export default class EditHistory extends Plugin {
 
         // The ribbon can be disabled from Obsidian UI, no need to check for a
         // specific disable here
-        const ribbonIconEl = this.addRibbonIcon("clock", "Open Edit History", (evt: MouseEvent) => {
+        const ribbonIconEl = this.addRibbonIcon("clock", "Open edit history", (evt: MouseEvent) => {
             if (this.keepEditHistoryForActiveFile()) {
                 new EditHistoryModal(this).open();
             }
@@ -510,7 +562,7 @@ export default class EditHistory extends Plugin {
         
         this.addCommand({
             id: "open-edit-history",
-            name: "Open Edit History for this file",
+            name: "Open edit history for this file",
             checkCallback: (checking: boolean) => {
                 if (this.keepEditHistoryForActiveFile()) {
                     if (!checking) {
@@ -524,11 +576,11 @@ export default class EditHistory extends Plugin {
 
         this.addCommand({
             id: "save-edit-history",
-            name: "Save current edit in the Edit History",
+            name: "Save current edit in the edit history",
             checkCallback: (checking: boolean) => {
                 if (this.keepEditHistoryForActiveFile()) {
                     if (!checking) {
-                        console.log("Forcing storing edit");
+                        logInfo("Forcing storing edit");
                         this.app.vault.trigger("modify", this.app.workspace.getActiveFile(), true);
                     }
                     return true;
@@ -542,7 +594,7 @@ export default class EditHistory extends Plugin {
     }
 
     onunload() {
-        console.log("unload");
+        logInfo("unload");
     }
 }
 
@@ -562,7 +614,7 @@ class EditHistoryModal extends Modal {
         let file = this.app.workspace.getActiveFile();
         if ((file == null) || (!this.plugin.keepEditHistoryForFile(file))) {
             // XXX This should never happen since callers don't fire the modal?
-            console.warn("Edit History not allowed for active file");
+            logWarn("Edit history not allowed for active file");
             return;
         }
 
@@ -571,11 +623,8 @@ class EditHistoryModal extends Modal {
         // this.minMsBetweenEdits
         let latestData = await this.app.vault.read(file);
 
-        // XXX Move these to styles.css
-        contentEl.style.display = "flex";
-        contentEl.style.overflow = "hidden";
-        contentEl.style.flexDirection = "column";
-
+        contentEl.addClass("edit-history-modal");
+        
         this.titleEl.setText("Edits for ");
         this.titleEl.createEl("i", { text: file.name });
 
@@ -584,17 +633,17 @@ class EditHistoryModal extends Modal {
         // XXX Review perf notes at https://stuk.github.io/jszip/documentation/limitations.html
         let zip: JSZip = new JSZip();
         let zipFilepath = this.plugin.getEditHistoryFilepath(file.path);
-        console.log("Opening zip file ", zipFilepath);
+        logInfo("Opening zip file ", zipFilepath);
         let zipFile = this.app.vault.getAbstractFileByPath(zipFilepath);
         if ((zipFile == null) || (!(zipFile instanceof TFile))) {
-            console.warn("No history file or not a file", zipFilepath);
+            logWarn("No history file or not a file", zipFilepath);
             contentEl.createEl("p", { text: "No edit history"});
             return;
         }
 
         let zipData = await this.app.vault.readBinary(zipFile);
         if (zipData == null) {
-            console.warn("Unable to read history file");
+            logWarn("Unable to read history file");
             contentEl.createEl("p", { text: "No edit history"});
             return;
         }
@@ -606,7 +655,7 @@ class EditHistoryModal extends Modal {
             filepaths.push(relativePath);
         });
         if (filepaths.length == 0) {
-            console.warn("Empty edit history file");
+            logWarn("Empty edit history file");
             contentEl.createEl("p", { text: "No edit history"});
             return;
         }
@@ -624,21 +673,14 @@ class EditHistoryModal extends Modal {
             .setButtonText("Copy")
             .setClass("mod-cta")
             .onClick(() => {
-                console.log("Copied to clipboard");
+                logInfo("Copied to clipboard");
                 navigator.clipboard.writeText(this.currentVersionData);
         });
 
         contentEl.createEl("br");
         contentEl.createEl("br");
         
-        // Set styles to scroll the diff div, not the modal div
-        let diffDiv = contentEl.createDiv();
-        diffDiv.style.flexGrow = "1";
-        diffDiv.style.flexShrink = "1";
-        diffDiv.style.flexBasis = "auto";
-        diffDiv.style.height = "100%";
-        diffDiv.style.overflowY = "scroll";
-        diffDiv.style.userSelect = "text";
+        let diffDiv = contentEl.createDiv("diff-div");
         select.onChange( async () => {
             // This is called both implicitly but also explicitly with a dummy
             // event that cannot fill the necessary fields, don't access the
@@ -646,9 +688,9 @@ class EditHistoryModal extends Modal {
             // XXX Abstract out instead?
             let selectedEdit = select.getValue();
 
-            // Rebuild the file data of the given edit by applying the
-            // patches in reverse, if one of the edits is stored fully,
-            // discard the accumulated patched data and use the full data
+            // Rebuild the file data of the given edit by applying the patches
+            // in reverse, if one of the edits is stored fully, discard the
+            // accumulated patched data and use the full data
             let dmpobj = new DiffMatchPatch();
             let data = latestData;
             let previousData = latestData;
@@ -680,7 +722,7 @@ class EditHistoryModal extends Modal {
             //     we have all the patches, but it's not clear how to
             //     convert from patch to diff, looks like patch.diff is the
             //     set of diffs for a given patch? (but will still need to 
-            //     re-dif when the whole file is saved instead of the diff)
+            //     re-diff when the whole file is saved instead of the diff)
             this.currentVersionData = data;
             let diffs = dmpobj.diff_main(data, previousData);
             // XXX Number of diffs is not a great measurement, this could show
@@ -696,25 +738,17 @@ class EditHistoryModal extends Modal {
             diffHtml = diffHtml.replace(/<ins [^>]*>/g, "<ins>");
             // <del style="background:#ffe6e6;">
             diffHtml = diffHtml.replace(/<del [^>]*>/g, "<del>");
-            // XXX This needs to replace spaces and tabs with nbsp;
-            //     otherwise html swallows the spaces and the diff coloring
-            //     is not visible. For the time being change to pre-wrap so
-            //     spaces are preserved but long text is still line-wrapped
-            diffDiv.style.whiteSpace = "pre-wrap";
-            // XXX Make colors configurable, in modal setting, per
-            //     styles.css, or per theme light/dark
+            // XXX Make colors configurable, in modal setting or per theme
+            //     light/dark
             //     See https://github.com/friebetill/obsidian-file-diff/issues/1#issuecomment-1425157959
             // XXX Have prev/next diff occurrence navigation
             // XXX Have a button to roll back to version
             // XXX Have an option to remove end of paragraph chars
-            // XXX Move the style to styles.css
-            // XXX innerHTML is disencouraged for security reasons, change?
+            // XXX innerHTML is discouraged for security reasons, change?
             //     (note this is safe because it comes from diff_prettyHtml)
             //     See https://github.com/obsidianmd/obsidian-releases/blob/master/plugin-review.md#avoid-innerhtml-outerhtml-and-insertadjacenthtml
-            diffHtml = '<style type="text/css" scoped>ins { color: white; background : green; }\ndel { color: white; background: red; }</style>' + diffHtml;
             diffDiv.innerHTML = diffHtml;
-            // Diffs are spans of <ins> os <del> tags, scroll to the first
-            // one
+            // Diffs are spans of <ins> os <del> tags, scroll to the first one
             diffDiv.querySelector<HTMLElement>("ins,del")?.scrollIntoView();
         });
 
@@ -727,8 +761,7 @@ class EditHistoryModal extends Modal {
             const date = new Date(utcepoch);
             select.addOption(filepath, date.toLocaleString());
         }
-        // Force initialization done inside onChange by re-setting the current
-        // value 
+        // Force initialization done inside onChange
         select.selectEl.trigger("change");
         
         // Fill in the stats now that all the information is available
@@ -743,7 +776,7 @@ class EditHistoryModal extends Modal {
     }
 
     onClose() {
-        console.log("onClose");
+        logInfo("onClose");
         const {contentEl} = this;
         contentEl.empty();
     }
@@ -757,7 +790,7 @@ class EditHistorySettingTab extends PluginSettingTab { plugin:
         this.plugin = plugin;
     }
     hide(): any {
-        console.log("hide");
+        logInfo("hide");
         super.hide();
     }
     display(): void {
@@ -765,25 +798,13 @@ class EditHistorySettingTab extends PluginSettingTab { plugin:
 
         containerEl.empty();
 
-        // h2 is abnormally small in settings, start with h3 which has the right
-        // size (other plugins do the same)
-        containerEl.createEl("h3", {text: "Edit History Settings"});
-
         let author = containerEl.createEl("small", { text: "Created by "});
         let link = containerEl.createEl("a", { text: "Antonio Tejada", href:"https://github.com/antoniotejada/"});
         author.appendChild(link);
 
-        new Setting(containerEl)
-            .setName("Show on status bar")
-            .setDesc("Show Edit History File information on the status bar. Click the status bar to show the Edit History for the current file.")
-            .addToggle(toggle => toggle
-                .setValue(this.plugin.settings.showOnStatusBar)
-                .onChange(async (value) => {
-                    console.log("Show edits on status bar: " + value);
-                    this.plugin.settings.showOnStatusBar = value;
-                    await this.plugin.saveSettings();
-                    this.plugin.statusBarItemEl.toggle(this.plugin.settings.showOnStatusBar);
-            }));
+        // h2 is abnormally small in settings, start with h3 which has the right
+        // size (other plugins do the same)
+        containerEl.createEl("h3", {text: "General"});
 
         new Setting(containerEl)
             .setName("Minimum seconds between edits")
@@ -792,7 +813,7 @@ class EditHistorySettingTab extends PluginSettingTab { plugin:
                 .setPlaceholder(DEFAULT_SETTINGS.minSecondsBetweenEdits)
                 .setValue(this.plugin.settings.minSecondsBetweenEdits)
                 .onChange(async (value) => {
-                    console.log("Minimum seconds between edits: " + value);
+                    logInfo("Minimum seconds between edits: " + value);
                     this.plugin.settings.minSecondsBetweenEdits = value;
                     await this.plugin.saveSettings();
                 }));
@@ -804,7 +825,7 @@ class EditHistorySettingTab extends PluginSettingTab { plugin:
                     .setPlaceholder(DEFAULT_SETTINGS.maxEdits)
                     .setValue(this.plugin.settings.maxEdits)
                     .onChange(async (value) => {
-                        console.log("Maximum number of edits: " + value);
+                        logInfo("Maximum number of edits: " + value);
                         this.plugin.settings.maxEdits = value;
                         await this.plugin.saveSettings();
                     }));
@@ -816,7 +837,7 @@ class EditHistorySettingTab extends PluginSettingTab { plugin:
                 .setPlaceholder(DEFAULT_SETTINGS.maxEditAge)
                 .setValue(this.plugin.settings.maxEditAge)
                 .onChange(async (value) => {
-                    console.log("Maximum age of edits: " + value);
+                    logInfo("Maximum age of edits: " + value);
                     this.plugin.settings.maxEditAge = value;
                     await this.plugin.saveSettings();
                 }));
@@ -828,7 +849,7 @@ class EditHistorySettingTab extends PluginSettingTab { plugin:
                 .setPlaceholder(DEFAULT_SETTINGS.maxHistoryFileSizeKB)
                 .setValue(this.plugin.settings.maxHistoryFileSizeKB)
                 .onChange(async (value) => {
-                    console.log("Maximum history file size: " + value);
+                    logInfo("Maximum history file size: " + value);
                     this.plugin.settings.maxHistoryFileSizeKB = value;
                     await this.plugin.saveSettings();
                 }));
@@ -840,8 +861,37 @@ class EditHistorySettingTab extends PluginSettingTab { plugin:
                 .setPlaceholder(DEFAULT_SETTINGS.extensionWhitelist)
                 .setValue(this.plugin.settings.extensionWhitelist)
                 .onChange(async (value) => {
-                    console.log("File extension whitelist: " + value);
+                    logInfo("File extension whitelist: " + value);
                     this.plugin.settings.extensionWhitelist = value;
+                    await this.plugin.saveSettings();
+                }));
+
+        containerEl.createEl("h3", {text: "Appearance"});
+        new Setting(containerEl)
+            .setName("Show on status bar")
+            .setDesc("Show edit history file information on the status bar. Click the status bar to show the edit history for the current file.")
+            .addToggle(toggle => toggle
+                .setValue(this.plugin.settings.showOnStatusBar)
+                .onChange(async (value) => {
+                    logInfo("Show edits on status bar: " + value);
+                    this.plugin.settings.showOnStatusBar = value;
+                    await this.plugin.saveSettings();
+                    this.plugin.statusBarItemEl.toggle(this.plugin.settings.showOnStatusBar);
+            }));
+
+        containerEl.createEl("h3", {text: "Debugging"});
+        new Setting(containerEl)
+            .setName("Debug level")
+            .setDesc("Messages to show in the javascript console.")
+            .addDropdown(dropdown => dropdown
+                .addOption("error", "Errors")
+                .addOption("warn", "Warnings")
+                .addOption("info", "Information")
+                .addOption("debug", "Verbose")
+                .setValue(this.plugin.settings.debugLevel)
+                .onChange(async (value) => {
+                    logInfo("Debug level: " + value);
+                    this.plugin.settings.debugLevel = value;
                     await this.plugin.saveSettings();
                 }));
 
@@ -891,8 +941,8 @@ class EditHistorySettingTab extends PluginSettingTab { plugin:
               other than "."') .addText(text => text .setPlaceholder('Enter the
               folder name')
               .setValue(this.plugin.settings.editHistoryRootFolder)
-              .onChange(async (value) => { console.log("onChange");
-              console.log('Edits folder: ' + value); // Only allow top level
+              .onChange(async (value) => { logInfo("onChange");
+              logInfo('Edits folder: ' + value); // Only allow top level
               folders
 
                     this.plugin.settings.editHistoryRootFolder = value;

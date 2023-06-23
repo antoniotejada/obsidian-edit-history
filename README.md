@@ -50,7 +50,7 @@ The most recent version of the note is always stored in full in the zip file, so
 
 This most recent version may not be the latest version of the note if a non-zero time between edits was set.
 
-Each entry in the file is named after the UTC epoch in seconds at which time the edit was made, encoded as chars.
+Each entry in the file is named after the UTC epoch in seconds at which time the edit was made, encoded as chars, and ending in "$" if the entry is stored in full, otherwise stored as a diff.
 
 
 ## TODO
@@ -61,4 +61,3 @@ Each entry in the file is named after the UTC epoch in seconds at which time the
 - Choose edit date by timeline/slider
 - Abstract out/refactor access to the edit history file
 - Test on mobile
-- Publish and perform releases
