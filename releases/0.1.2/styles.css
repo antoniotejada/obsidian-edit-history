@@ -1,0 +1,31 @@
+/* 
+ * Styles for Edit History plugin
+ */
+
+
+/* Modal displaying the edit history */
+.edit-history-modal {
+    display: flex;
+    overflow: hidden;
+    flex-direction: column;
+}
+
+/* Div displaying the diff inside the edit history modal */
+.edit-history-modal .diff-div {
+    /* Set styles to scroll the div, not the parent modal */
+    flex-grow: 1;
+    flex-shrink: 1;
+    flex-basis: auto;
+    height: 100%;
+    overflow-y: scroll;
+    user-select: text;
+    /* Preserve spaces/tabs so diffs of those are visible (but still line-wrap
+    long text) */
+    white-space: pre-wrap;
+}
+
+/* Insertions and deletions inside the edit history diff div */
+
+.edit-history-modal .diff-div ins { color: white; background : green; }
+
+.edit-history-modal .diff-div del { color: white; background: red; }

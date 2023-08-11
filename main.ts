@@ -1,4 +1,16 @@
-import { App, Modal, normalizePath, Plugin, PluginSettingTab, Setting, TFile, TAbstractFile, TFolder, ButtonComponent, DropdownComponent } from "obsidian";
+import { 
+    App, 
+    Modal, 
+    normalizePath, 
+    Plugin, 
+    PluginSettingTab, 
+    Setting, 
+    TFile, 
+    TAbstractFile, 
+    TFolder, 
+    ButtonComponent, 
+    DropdownComponent 
+} from "obsidian";
 import { DiffMatchPatch } from "diff-match-patch-ts";
 // @ts-ignore: Complains about default export this way, but since jszip 3.10 this
 // is the recommended way
@@ -74,7 +86,12 @@ const EDIT_HISTORY_FILE_EXT = ".edtz";
 
 // XXX Have a timeline view of changes (per day, hour, etc)
 
-// XXX Allow management in the edit history modal, merging diffs, deleting, deleting all history
+// XXX Allow management in the edit history modal, merging diffs, deleting, deleting all historyç
+
+// XXX tgz reduces size by half, use native browser gzip plus tar? (at the
+//     expense of having to uncompress the whole file in memory, not clear jszip
+//     does that already anyway?)
+//     See https://stackoverflow.com/questions/65446607/how-do-i-extract-data-from-a-tar-gz-file-stored-in-the-cloud-from-a-browser
 
 
 export default class EditHistory extends Plugin {
@@ -494,19 +511,27 @@ export default class EditHistory extends Plugin {
                 return;
             }
 
-            // Don't move edit history files when the note is moved if notes and
-            // edit history files are in the same directory (ie empty
-            // editHistoryRootFolder). Otherwise, moving the edit history file
-            // would cause Obsidian to throw a benign error when it tries to
-            // move the edit history file and finds it's not there anymore.
+
+            // Since Obsidian will move the folder contents when a folder is
+            // moved, only move the history file when the note is renamed or
+            // moved to a different parent (or if history files are kept in
+            // their own directory)
+            // Otherwise, moving the edit history file would cause Obsidian to
+            // throw a benign error when it tries to move the edit history file
+            // and finds it's not there anymore.
+            const oldFiledirs = oldPath.split("/");
+            const oldFilename = oldFiledirs.pop();
+            const oldParentFolder = (oldFiledirs.length > 0) ? oldFiledirs.pop() : "";
+            const filedirs = file.path.split("/");
+            const filename = filedirs.pop();
+            const parentFolder = (filedirs.length > 0) ? filedirs.pop() : "";
             if ((this.settings.editHistoryRootFolder == "") && 
-                (oldPath.split("/").pop() == file.name)) {
-                logDbg("Ignoring directory-only change rename");
+                ((oldParentFolder == parentFolder) && (oldFilename == filename))) {
+                logDbg("Not moving edit history, expected to be moved later alongside parent folder");
                 return;
             }
 
             // Rename the edit history file if any
-
             let zipFilepath = this.getEditHistoryFilepath(oldPath);
             let zipFile = this.app.vault.getAbstractFileByPath(zipFilepath);
             if (zipFile != null) {
@@ -661,7 +686,7 @@ class EditHistoryModal extends Modal {
         }
 
         let revStats = contentEl.createEl("p");
-        const control = contentEl.createDiv("setting-item-control")
+        const control = contentEl.createDiv("setting-item-control");
         control.style.justifyContent = "flex-start";
         const select = new DropdownComponent(control);
         select.selectEl.focus();
@@ -798,9 +823,8 @@ class EditHistorySettingTab extends PluginSettingTab { plugin:
 
         containerEl.empty();
 
-        let author = containerEl.createEl("small", { text: "Created by "});
-        let link = containerEl.createEl("a", { text: "Antonio Tejada", href:"https://github.com/antoniotejada/"});
-        author.appendChild(link);
+        containerEl.createEl("small", { text: "Created by "})
+            .appendChild(createEl("a", { text: "Antonio Tejada", href:"https://github.com/antoniotejada/"}));
 
         // h2 is abnormally small in settings, start with h3 which has the right
         // size (other plugins do the same)
@@ -930,9 +954,9 @@ class EditHistorySettingTab extends PluginSettingTab { plugin:
                configuring the edit history folder in settings would cause a
                rename on each keystroke. There doesn't seem to be a final
                changed(), hide() is not called either
-            
+
             - it's not clear whether the folder should be deleted if empty
-            
+
             - it's not clear if it's safe to just copy all the files found with
               whatever extension new Setting(containerEl) .setName('Edits
               folder') .setDesc('Folder to store the edit history file. Empty to
@@ -941,20 +965,30 @@ class EditHistorySettingTab extends PluginSettingTab { plugin:
               other than "."') .addText(text => text .setPlaceholder('Enter the
               folder name')
               .setValue(this.plugin.settings.editHistoryRootFolder)
-              .onChange(async (value) => { logInfo("onChange");
-              logInfo('Edits folder: ' + value); // Only allow top level
-              folders
+              .onChange(async (value) => { logInfo("onChange"); logInfo('Edits
+              folder: ' + value); // Only allow top level folders
 
                     this.plugin.settings.editHistoryRootFolder = value;
 
 
-            // XXX Can the folder just be renamed via the file explorer
-            interface? // XXX Check no dir component starts with "." // XXX
-            Delete edits? copy them to new folder? trash them? // XXX Ask the
-            user to delete folder? // XXX Ask for confirmation? // XXX Use
-            private apis to store in some hidden folder? await
-            this.plugin.saveSettings();
-                }));
+            XXX Can the folder just be renamed via the file explorer
+            interface? 
+
+            XXX Check no dir component starts with "." 
+
+            XXX Delete edits? copy them to new folder? trash them? 
+
+            XXX Ask the user to delete folder? 
+
+            XXX Ask for confirmation? 
+
+            XXX Use private apis to store in some hidden folder? 
+
+            XXX This could use the adapter apis instead of the vault apis //
+            be able to access the .obsidian dir? (or any other?)
+
+            XXX The directory doesn't need to be created on every keystroke,
+            it could have a create/commit button?
         */
 
 

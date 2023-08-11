@@ -2,11 +2,11 @@
 
 This plugin saves each edit done to a note into a edit history file, the edits can later be diffed or copied.
 
-![image](https://github.com/antoniotejada/lessmostat/assets/6446344/5f19d87d-0f1c-48c8-bc55-45043b37a7e4)
+![image](https://github.com/antoniotejada/obsidian-edit-history/assets/6446344/fa9456d5-0de0-4160-bd06-6a38494f7c57)
 
 This is similar to the [File Recovery](https://help.obsidian.md/Plugins/File+recovery) core plugin with the following advantages:
 - Can keep edit history of any type of file, selectable via settings
-- Open edit history file format
+- Opensource edit history file format
 - History files are kept independently per vault and file
 - History files can be externally accessed, examined, copied around, or deleted
 - History files can be backed up by external means
@@ -58,6 +58,10 @@ Each entry in the file is named after the UTC epoch in seconds at which time the
 - Edit diff prev/next navigation
 - Restore a given edit
 - Diff one edit against another arbitrary edit
-- Choose edit date by timeline/slider
+- Choose edit date by timeline/slider/calendar view
 - Abstract out/refactor access to the edit history file
-- Test on mobile
+- Edit History File management:
+  - find orphaned files
+  - per file/vault statistics
+  - merge/remove edits
+  - ...
