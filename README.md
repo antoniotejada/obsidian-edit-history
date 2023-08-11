@@ -52,6 +52,21 @@ This most recent version may not be the latest version of the note if a non-zero
 
 Each entry in the file is named after the UTC epoch in seconds at which time the edit was made, encoded as chars, and ending in "$" if the entry is stored in full, otherwise stored as a diff.
 
+## Versions
+
+[Github releases](https://github.com/antoniotejada/obsidian-edit-history/releases)
+
+### [0.1.3](https://github.com/antoniotejada/obsidian-edit-history/releases/tag/0.1.3) (2023-08-11)
+- Added versions section to README.md
+
+### [0.1.2](https://github.com/antoniotejada/obsidian-edit-history/releases/tag/0.1.2) (2023-08-11)
+- Fix for #4 https://github.com/antoniotejada/obsidian-edit-history/issues/4
+
+### [0.1.1](https://github.com/antoniotejada/obsidian-edit-history/releases/tag/0.1.1) (2023-06-23)
+- Changes to comply with plugin submission guidelines
+
+### [0.1.0](https://github.com/antoniotejada/obsidian-edit-history/releases/tag/0.1.2) (2023-06-17)
+- First fully functional version
 
 ## TODO
 - Allow specifying the edit history root folder?
