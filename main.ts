@@ -52,6 +52,7 @@ function debugbreak() {
 
 interface EditHistorySettings {
     minSecondsBetweenEdits: string;
+    secondsOfEditSamplingPeriod: string;
     maxEdits: string;
     maxEditAge: string;
     maxHistoryFileSizeKB: string;
@@ -64,6 +65,7 @@ interface EditHistorySettings {
 
 const DEFAULT_SETTINGS: EditHistorySettings = {
     minSecondsBetweenEdits: "60",
+    secondsOfEditSamplingPeriod: "-1",
     maxEditAge: "0",
     maxEdits: "0",
     maxHistoryFileSizeKB: "0",
@@ -106,6 +108,8 @@ export default class EditHistory extends Plugin {
     // seconds, changes done less than one second apart are ignored and lumped with
     // the next change
     minMsBetweenEdits: number;
+    // Number of milliseconds for checking edits whether in the same period
+    msOfEditSamplingPeriod: number;
     // Maximum number of age in milliseconds or Infinity
     maxEditAgeMs: number;
     // Maximum number of edits to keep or Infinity
@@ -189,6 +193,7 @@ export default class EditHistory extends Plugin {
         hookLogFunctions(debugLevels.indexOf(settings.debugLevel), "EditHistoryPlugin");
 
         this.minMsBetweenEdits = parseInt(settings.minSecondsBetweenEdits) * 1000 || Infinity; 
+        this.msOfEditSamplingPeriod = parseInt(settings.secondsOfEditSamplingPeriod) * 1000 || Infinity; 
         this.maxEdits = parseInt(settings.maxEdits) || Infinity;
         this.maxEditAgeMs = parseInt(settings.maxEditAge) * 1000 || Infinity;
         let extensionWhitelist = settings.extensionWhitelist.split(",");
@@ -237,14 +242,27 @@ export default class EditHistory extends Plugin {
                 return;
             }
 
-            // Ignore changes less than a given time ago unless forcing (ie event
+            // Ignore changes less than a given time ago
+            // or ignore changes no later than a new sampling period
+            // unless forcing (ie event
             // was triggered explicitly in order to force saving pending edits)
             // XXX Abstract this and remove the force flag?
             if (!force && 
-                (zipFile != null) && ((file.stat.mtime - zipFile.stat.mtime) < this.minMsBetweenEdits)) {
-                logDbg("Need to pass", 
-                    (this.minMsBetweenEdits - (file.stat.mtime - zipFile.stat.mtime)) / 1000, "s between edits, ignoring");
-                return;
+                (zipFile != null)) {
+                    // Check whether in a new sampling period
+                    // useful if needing statistics
+                    if (Math.floor(file.stat.mtime / this.msOfEditSamplingPeriod) 
+                        <= Math.floor(zipFile.stat.mtime / this.msOfEditSamplingPeriod)){
+                        const nextMsOfSampling = this.msOfEditSamplingPeriod - zipFile.stat.mtime % this.msOfEditSamplingPeriod
+                        logDbg("Too early for sampling, needing another",
+                        nextMsOfSampling/1000,"s")
+                        return;
+                    }
+                    if((file.stat.mtime - zipFile.stat.mtime) < this.minMsBetweenEdits){
+                        logDbg("Need to pass", 
+                        (this.minMsBetweenEdits - (file.stat.mtime - zipFile.stat.mtime)) / 1000, "s between edits, ignoring");
+                        return;
+                    }
             }
 
             // Ideally, in order to minimize history file size, the history file
@@ -831,8 +849,20 @@ class EditHistorySettingTab extends PluginSettingTab { plugin:
         containerEl.createEl("h3", {text: "General"});
 
         new Setting(containerEl)
+            .setName("Seconds of edit sampling period")
+            .setDesc("Number of seconds for sampling period where edit is only stored once. Modifications done between samplings will be merged into the next edit, reducing the edit history file size at the expense of less history granularity. Set to 0 will prevent edit history store. Set to negtive means no time limit for sampling.")
+            .addText(text => text
+                .setPlaceholder(DEFAULT_SETTINGS.secondsOfEditSamplingPeriod)
+                .setValue(this.plugin.settings.secondsOfEditSamplingPeriod)
+                .onChange(async (value) => {
+                    logInfo("Seconds of edit sampling period: " + value);
+                    this.plugin.settings.secondsOfEditSamplingPeriod = value;
+                    await this.plugin.saveSettings();
+                }));
+        
+        new Setting(containerEl)
             .setName("Minimum seconds between edits")
-            .setDesc("Minimum number of seconds that must pass from the previous edit to store a new edit. Modifications done between those seconds will be merged into the next edit, reducing the edit history file size at the expense of less history granularity.")
+            .setDesc("Minimum number of seconds that must pass from the previous edit to store a new edit. Modifications done between those seconds will be merged into the next edit, reducing the edit history file size at the expense of less history granularity. Set to 0 will prevent edit history store. Set to negtive means no waiting time.")
             .addText(text => text
                 .setPlaceholder(DEFAULT_SETTINGS.minSecondsBetweenEdits)
                 .setValue(this.plugin.settings.minSecondsBetweenEdits)
