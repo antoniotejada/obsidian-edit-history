@@ -2,7 +2,7 @@
 
 This plugin saves each edit done to a note into a edit history file, the edits can later be diffed or copied.
 
-![image](https://github.com/antoniotejada/obsidian-edit-history/assets/6446344/fa9456d5-0de0-4160-bd06-6a38494f7c57)
+![image](https://github.com/user-attachments/assets/e02be307-6945-46af-a8c0-02adbc48212d)
 
 This is similar to the [File Recovery](https://help.obsidian.md/Plugins/File+recovery) core plugin with the following advantages:
 - Can keep edit history of any type of file, selectable via settings
@@ -16,7 +16,10 @@ This is similar to the [File Recovery](https://help.obsidian.md/Plugins/File+rec
 ## Features
 
 - Browse previous edits
+- Choose edit by calendar view or by timeline view
 - Diff one edit against a previous one
+- Prev/Next button or keyboard diff navigation
+- Timeline, side by side, top by bottom, or inline diff view
 - Manually copy and paste a previous edit or parts of a previous edit
 - Limit edit history frequency (set maximum interval of seconds between edits to save to the history file)
 - Limit edit history file size by number of edits (keep less than a number of edits in the file, removing older ones)
@@ -27,16 +30,18 @@ This is similar to the [File Recovery](https://help.obsidian.md/Plugins/File+rec
 - Edit history files can be safely deleted outside of Obsidian in order to free storage.
 - Keep edit history files for all files or just for the extensions specified in the settings
 
+
 ## Usage
 
 - Modify the plugin settings as desired
 - Edit notes as usual, edits will be saved in the Edit History File for that note, as specified in the settings
 - An edit can be manually saved by invoking the command *Edit History: Save current edit in the Edit History*
 - Click on the clock ribbon icon or invoke the command *Edit History: Open Edit History For This File*
-  - A dialog box with a drop down of the stored edits will pop up
-  - Navigate through the different edits by picking from the drop down
+  - A dialog box with an activity calendar and a drop down of the stored edits will pop up. The year of the calendar is given by the year of the currently selected drop down option
+  - Navigate through the different edits by picking from the drop down or clicking on the calendar
   - Insertions are shown as green, deletions as red
   - Copy the current edit with the Copy button
+  - Navigate through diffs in this edit via keyboard or the Previous/Next buttons
 
 ## The edit history file
 
@@ -56,6 +61,18 @@ Each entry in the file is named after the UTC epoch in seconds at which time the
 
 [Github releases](https://github.com/antoniotejada/obsidian-edit-history/releases)
 
+### [0.2.0](https://github.com/antoniotejada/obsidian-edit-history/releases/tag/0.2.0) (2025-02-25)
+- Implemented #8 https://github.com/antoniotejada/obsidian-edit-history/issues/8
+  - Added side by side, top by bottom, inline, and timeline diff view and settings
+- Other assorted enhancements to diff view:
+  - Added calendar view
+  - Added previous/next diff navigation
+  - Added whitespace display in diff view and settings
+  - Made diff view larger and lines breakable
+  - Added display of current diff index
+  - Choose edit date by timeline/slider/calendar view
+  - Added keyboard navigation
+
 ### [0.1.3](https://github.com/antoniotejada/obsidian-edit-history/releases/tag/0.1.3) (2023-08-11)
 - Added versions section to README.md
 
@@ -70,10 +87,8 @@ Each entry in the file is named after the UTC epoch in seconds at which time the
 
 ## TODO
 - Allow specifying the edit history root folder?
-- Edit diff prev/next navigation
 - Restore a given edit
 - Diff one edit against another arbitrary edit
-- Choose edit date by timeline/slider/calendar view
 - Abstract out/refactor access to the edit history file
 - Edit History File management:
   - find orphaned files

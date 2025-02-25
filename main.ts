@@ -1,19 +1,35 @@
 import { 
     App, 
+    ButtonComponent, 
+    DropdownComponent,
     Modal, 
     normalizePath, 
     Plugin, 
     PluginSettingTab, 
     Setting, 
-    TFile, 
     TAbstractFile, 
+    TFile, 
     TFolder, 
-    ButtonComponent, 
-    DropdownComponent 
+    ToggleComponent
 } from "obsidian";
-import { DiffMatchPatch } from "diff-match-patch-ts";
-// @ts-ignore: Complains about default export this way, but since jszip 3.10 this
-// is the recommended way
+import { DiffMatchPatch, Diff } from "diff-match-patch-ts";
+// diff-match-patch-ts doesn't export properly module enums, it uses a const
+// enum (instead of a non const enum) which is removed at compile time and not
+// visible by importers:
+//  - Without isolatedModules set it errors out with "Cannot access ambient
+//    const enums when the '--isolatedModules' flag is provided" 
+//  - With isolated isolatedModules set to false in tsconfig.json, when
+//    importing DiffOp the DiffOp object exists but it's null and the defines
+//    cannot be used 
+// Copy them here from diff-op.enum.d.ts
+const enum DiffOp {
+    Delete = -1,
+    Equal = 0,
+    Insert = 1
+}
+
+// @ts-ignore: Complains about default export this way, but since jszip 3.10
+// this is the recommended way
 import JSZip from "jszip";
 
 
@@ -49,6 +65,48 @@ function debugbreak() {
     debugger;
 }
 
+ const htmlChars :  { [key: string]: string } = {
+    "&" : "&amp;",
+    "\"": "&quot;",
+    "'/": '&#39;',
+    "<" : '&lt;',
+    ">": '&gt;',
+    "\n": "<br>\n",
+ };
+ const htmlCharsRegexp = new RegExp(Object.keys(htmlChars).join("|"), "g");
+
+ const htmlWhitespaceChars : { [key: string]: string } = {
+     ...htmlChars,
+    "\t": "&rarr;\t",
+    " ": "&middot;",
+    "\n": "&para;<br>\n"
+ };
+ const htmlWhitespaceCharsRegexp = new RegExp(Object.keys(htmlWhitespaceChars).join("|"), "g");
+
+function htmlEncode(str: string, whitespace: boolean): string {
+    // XXX or use document.createTextNode(str).textContent?
+    // This can be a performance hotspot, so use an efficient way of replacing
+    // multiple strings in a single pass
+    return (whitespace) 
+        ? str.replace(htmlWhitespaceCharsRegexp, c => htmlWhitespaceChars[c])
+        : str.replace(htmlCharsRegexp, c => htmlChars[c]);
+}
+
+enum DiffDisplayFormat {
+    Raw        = "RAW",
+    Timeline   = "TIMELINE",
+    Inline     = "INLINE",
+    Horizontal = "HORIZONTAL",
+    Vertical   = "VERTICAL",
+};
+
+const diffDisplayFormatToString: Record<DiffDisplayFormat, string> = {
+    [DiffDisplayFormat.Raw]        : "raw",
+    [DiffDisplayFormat.Timeline]   : "timeline",
+    [DiffDisplayFormat.Inline]     : "inline",
+    [DiffDisplayFormat.Horizontal] : "side by side",
+    [DiffDisplayFormat.Vertical]   : "top by bottom",
+};
 
 interface EditHistorySettings {
     minSecondsBetweenEdits: string;
@@ -58,6 +116,8 @@ interface EditHistorySettings {
     editHistoryRootFolder: string;
     extensionWhitelist: string;
     showOnStatusBar: boolean;
+    diffDisplayFormat: string;
+    showWhitespace: boolean;
     debugLevel: string;
     // XXX Have color setting for addition fore/back, deletion fore/back 
 }
@@ -70,6 +130,8 @@ const DEFAULT_SETTINGS: EditHistorySettings = {
     editHistoryRootFolder: "",
     extensionWhitelist: ".md, .txt, .csv, .htm, .html",
     showOnStatusBar: true,
+    diffDisplayFormat: DiffDisplayFormat.Inline,
+    showWhitespace: true,
     debugLevel: "warn"
 }
 
@@ -84,8 +146,6 @@ const EDIT_HISTORY_FILE_EXT = ".edtz";
 //     be done without private apis by inserting the text in edit history order at file
 //     load, will probably need a flag to prevent from storing double history)
 
-// XXX Have a timeline view of changes (per day, hour, etc)
-
 // XXX Allow management in the edit history modal, merging diffs, deleting, deleting all historyç
 
 // XXX tgz reduces size by half, use native browser gzip plus tar? (at the
@@ -98,13 +158,13 @@ export default class EditHistory extends Plugin {
     settings: EditHistorySettings;
     statusBarItemEl: HTMLElement;
 
-    // Minimum number of milliseconds between edits, if a modification occurs
-    // before that time will be ignored at this moment and lumped with later
-    // modifications once the minimum time has passed and a new modification is done
-    // This means that the edit file may not contain the latest version
-    // Note that because of the current filename being derived from the epoch in
-    // seconds, changes done less than one second apart are ignored and lumped with
-    // the next change
+    // Minimum number of milliseconds between edits or Infinity, if a
+    // modification occurs before that time will be ignored at this moment and
+    // lumped with later modifications once the minimum time has passed and a
+    // new modification is done This means that the edit file may not contain
+    // the latest version Note that because of the current filename being
+    // derived from the epoch in seconds, changes done less than one second
+    // apart are ignored and lumped with the next change 
     minMsBetweenEdits: number;
     // Maximum number of age in milliseconds or Infinity
     maxEditAgeMs: number;
@@ -159,13 +219,36 @@ export default class EditHistory extends Plugin {
     getEditHistoryFilepath(filepath: string): string {
         return normalizePath(this.editHistoryRootFolder + "/" + filepath + EDIT_HISTORY_FILE_EXT);
     }
+
+    getEditCompressedSize(zip: JSZip, filepath: string): number {
+        // The only way of getting the file size is by accessing
+        // the internal field _data
+        // See https://github.com/Stuk/jszip/issues/247
+        return zip.file(filepath)._data.compressedSize;
+    }
     
     getEditEpoch(editFilename: string): number {
         return parseInt(editFilename, 36) * 1000;
     }
 
+    getEditDate(editFilename: string): Date {
+        return new Date(this.getEditEpoch(editFilename));
+    }
+
+    getEditLocalDateStr(editFilename: string): string {
+        return this.getEditDate(editFilename).toLocaleString();
+    }
+
+    getEditFileTime(editFilename: string): number {
+        // Note this ignores the hh:mm:ss part of the time
+        let d = this.getEditDate(editFilename);
+        d = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+        const t = d.getTime();
+        return t;
+    }
+
     getEditIsDiff(editFilename: string): boolean {
-        return editFilename.endsWith("$");
+        return !editFilename.endsWith("$");
     }
     
     buildEditFilename(mtime: number, isDiff: boolean): string {
@@ -179,7 +262,11 @@ export default class EditHistory extends Plugin {
      */
     sortEdits(filenames: string[], descending: boolean = true) {
         const i = descending ? 1 : -1; 
-
+        // Note this cannot do straight alphabetical sort on the base-36 encoded
+        // epochs since theoretically strings could be different lengths, convert
+        // to epoch before sorting
+        // XXX Could do .length plus < checks, though, removing trailing $ when
+        //     necessary)
         filenames.sort((a,b) => i * (this.getEditEpoch(b) - this.getEditEpoch(a)));
     }
 
@@ -218,6 +305,9 @@ export default class EditHistory extends Plugin {
         // Load settings as early as possible console output is seen if enabled
         await this.loadSettings();
 
+        // XXX Make this a member variable?
+        let dmpobj = new DiffMatchPatch();
+
         logInfo("onLoad");
 
         this.registerEvent(this.app.vault.on("modify", async (fileOrFolder: TAbstractFile, force: boolean = false) => {
@@ -236,10 +326,71 @@ export default class EditHistory extends Plugin {
                 logError("Edit history file is not a file", zipFilepath);
                 return;
             }
+            
+            // XXX Cleanup all naming:
+            //
+            //     - revision/edit: each individual file stored inside the zip
+            //       file containg a dmp patch in text form (collection of
+            //       contextless dmp diffs). Has a unique date and time. The
+            //       file stores the diff between this version and the previous
+            //       one and has the date at which the current version was
+            //       saved. First the whole version is saved verbatim without
+            //       diffs, when the next version comes across, then the current
+            //       version is diffed against the verbatim version and the
+            //       verbatin replaced with that diff
+            //
+            //     - diff: a version has one or more diffs (or none if the file
+            //       was stored verbatim).
+            //
+            //     - dmp diff: A dmp diff is context-full, it can be traversed.
+            //       Each diff has one DiffOp operation (delete, equal, insert)
+            //       with one or more lines of payload
+            //
+            //     - dmp patch: A dmp a patch is context-less, ie a set of diffs
+            //       that requires the file in order to be applied. Only has
+            //       delete and insert operations, equal has been removed so
+            //       they cannot be applied without the original file
 
             // Ignore changes less than a given time ago unless forcing (ie event
             // was triggered explicitly in order to force saving pending edits)
             // XXX Abstract this and remove the force flag?
+            
+            // Note this uses the zipFile time and not the entry time (which
+            // requires reading the zipFile and has a DOS date 2-second
+            // inaccuracy and is local time) or the name to timestamp
+            // translation (which is accurate and UTC but requires hitting the
+            // zipFile)
+            
+            // XXX The zipFile date could be cached for later invocations to
+            //     early exit above without even decoding the zipfile path? (but
+            //     requires a per zipFile cache)
+            
+            // XXX Still there can be some minor inaccuracy because the zipFile
+            //     date is not reset, see
+            //     https://github.com/antoniotejada/obsidian-edit-history/issues/15
+
+            // XXX This has the issue that edits that are far apart in time 
+            //      could appear merged together:
+            //      1) An edit A was done at time T but it was too close to
+            //         the previous edit so it's ignored
+            //      2) Edit B is done hours later, now edit A and B are
+            //         stored as a single edit
+            //     This should either 
+            //     a) merge the current edit with the previous one as long
+            //        as not enough time has passed (inefficient since it will
+            //        be doing idle work on every modification) 
+            //     b) fire a timer on every modification, and only save from
+            //        that timer. Probably delay that timer if already running
+            //        so edits are only saved after "n seconds of idle time"
+            //        Using a timer also avoids any date checks on the file
+            //        This needs to watch out for any race conditions with a
+            //        simultaneous change, hopefully none since the file api
+            //        should be safe? (and typescript should be single
+            //        threaded) but still the file could have been deleted in 
+            //        the interim? Note this approach will still merge
+            //        unrelated edits when the app is closed before the timer
+            //        expires. The timer needs to be per file/editor?
+            //     See https://github.com/antoniotejada/obsidian-edit-history/issues/9
             if (!force && 
                 (zipFile != null) && ((file.stat.mtime - zipFile.stat.mtime) < this.minMsBetweenEdits)) {
                 logDbg("Need to pass", 
@@ -334,10 +485,7 @@ export default class EditHistory extends Plugin {
                         //     smarter like merging entries which could also
                         //     decrease the history file size?
                         purge = true;
-                        // The only way of getting the file size is by accessing
-                        // the internal field _data
-                        // See https://github.com/Stuk/jszip/issues/247
-                        zipFileSize -= zip.file(filepath)._data.compressedSize;
+                        zipFileSize -= this.getEditCompressedSize(zip, filepath);
                     }
                     if (!purge) {
                         // Entries are purged from the end, loop can exit if
@@ -382,7 +530,6 @@ export default class EditHistory extends Plugin {
                         return;
                     }
                     
-                    let dmpobj = new DiffMatchPatch();
                     logInfo("unpacking " + mostRecentFilename);
                     let prevFileData = await mostRecentFile.async("string");
                     // @ts-ignore: complains about missing opt_c, but
@@ -626,47 +773,471 @@ export default class EditHistory extends Plugin {
 class EditHistoryModal extends Modal { 
     plugin: EditHistory;
     currentVersionData: string;
-    diffInfo: HTMLElement;
-
+    curDiffIndex: number;
+    diffElements: NodeListOf<HTMLElement>;
+    
     constructor(plugin: EditHistory) { 
         super(plugin.app);
         this.plugin = plugin;
     }
 
-    async onOpen() {
-        const {contentEl} = this;
+    renderCalendar(calendarDiv: HTMLElement, select: DropdownComponent, zipFile: TFile, zip: JSZip, filepaths: string[]) {
+        // XXX Abstract this more? problems are revstats requiring the zip file
+        //     or recalculate values outside. select should also be removed and
+        //     take a cell onclick callback or do the cell onclick in the caller?
 
-        let file = this.app.workspace.getActiveFile();
+        // Display the list of changes for the currently selected year as a
+        // table with one color-coded cell per day of the year, similar to
+        // github commit activity: one cell per day, one row per day of the
+        // week, one column per week, multiple columns per month.
+
+        const selectedEdit = select.getValue();
+        const year = this.plugin.getEditDate(selectedEdit).getFullYear();
+        
+        let calendarHtml = '<table class="calendar">';
+        let fileTimes = new Set<number>();
+        let fileTimeToDiffCount = new Map<number, number>();
+        let fileSize = 0;
+        let numFiles = 0;
+
+        // Collect the times of all edits in the given year
+        for (let fp of filepaths) {
+            // XXX filepaths are sorted by decreasing date, could binary search
+            //     to the selected year, probably overkill?
+            let d = this.plugin.getEditDate(fp);
+            if (d.getFullYear() == year) {
+                const t = this.plugin.getEditFileTime(fp);
+                fileTimes.add(t);
+                fileTimeToDiffCount.set(t, (fileTimeToDiffCount.get(t) || 0) + 1);
+                fileSize += this.plugin.getEditCompressedSize(zip, fp);
+                numFiles++;
+            } else if (d.getFullYear() < year) {
+                // filepaths are sorted newest first, exit when switching
+                // to a previous year
+                break;
+            }
+        }
+        const diffCounts = Array.from(fileTimeToDiffCount.values());
+        const maxFileDiffCount = Math.max(...diffCounts);
+        const minFileDiffCount = Math.min(...diffCounts);
+        const diffCountRange = maxFileDiffCount - minFileDiffCount + 1;
+        const maxShades = 6;
+        const selectedFileTime = this.plugin.getEditFileTime(selectedEdit);
+        const firstDayOfYear = new Date(year, 0, 1);
+        const startDate = new Date(year, 0, 1 - firstDayOfYear.getDay());
+        // one row per day of the week
+        const numRows = 7;
+        // setDate(0) sets the day of the month to 0, which causes
+        // typescript to adjust it to the last day of the previous month
+        const leapDelta =  new Date(year, 2, 0).getDate() - 28;
+        // need to show at least 365 days plus padding for previous year
+        // plus leap
+        const numCols = Math.round((365 + firstDayOfYear.getDay() + leapDelta) / numRows);
+        
+        let month = 0;
+        let monthColStart = 0;
+        calendarHtml += `<tr><td>${year}</td>`;
+        
+        // Generate the HTML for the month column headers, each month is a
+        // variable number of columns depending on the day of the week the first
+        // day of the month falls in and the length of the month in days
+        
+        // set d at the bottom row, will indicate when the current column spills
+        // to the next month and a new column header is needed
+        let d = new Date(startDate);
+        d.setDate(d.getDate() + 6);
+        for (let col = 0; col < numCols; ++col) {
+            // Spill the previous month if this column ends in a new
+            // month, this is done after the fact since that's when
+            // colspan is known, so it also needs to spill if the last column
+            if ((month != d.getMonth()) || (col == numCols - 1)) {
+                const dd = new Date(d.getFullYear(), month, 1);
+                calendarHtml += `<td colspan="${(col - monthColStart)}">${dd.toLocaleDateString(undefined, { month: 'short' })}</td>`;
+                monthColStart = col;
+                month = d.getMonth();
+            }
+            d.setDate(d.getDate() + 7);
+        }
+        calendarHtml += "</tr>";
+
+        // Generate HTML for the day cells, one cell per day, one day of the
+        // week per row, one week per column
+        for (let row = 0; row < numRows; ++row) {
+            let d =  new Date(startDate);
+            d.setDate(d.getDate() + row);
+            calendarHtml += `<tr><td>${d.toLocaleDateString(undefined, { weekday: 'short' })}</td>`;
+            for (let col = 0; col < numCols; ++col) {
+                // Month is 0-indexed and it's okay to overflow days in
+                // constructor, Typescript handles it
+                const t = d.getTime();
+                let count = 0;
+                let styleClass = "calendar-empty-"  +  ((d.getMonth() & 1) ? "odd" : "even");
+                if (d.getFullYear() != year) {
+                    styleClass = "calendar-black";
+                } else if (fileTimes.has(t)) {
+                    count = fileTimeToDiffCount.get(t) || 0;
+                    // XXX Verify this for when there are less changes than
+                    //     levels, which levels to pick (specifically what level
+                    //     is picked if only one change)
+                    // XXX Fix this for when there are no changes (can happen
+                    //     for the first date if the stored file matches the
+                    //     current file contents and there are no other edits
+                    //     that day)
+                    const shadeLevel = Math.round(((count-minFileDiffCount) * maxShades) / diffCountRange);
+                    if (t == selectedFileTime) {
+                        styleClass = "calendar-selected ";
+                    } else {
+                        styleClass = "calendar-level ";
+                    }
+                    styleClass += "clickable level-" + shadeLevel;
+                } 
+                calendarHtml += `<td id="calendar-${t}" class="${styleClass}" title="${d.toLocaleDateString()}${(count == 0) ? '' : ' (' + count + ' edits)' }"></td>`;
+                d.setDate(d.getDate()+7);
+            }
+            calendarHtml += "</tr>";
+        }
+        calendarHtml += "</table>";
+        calendarDiv.innerHTML = calendarHtml;
+        const calendarTable = calendarDiv.querySelector("table") as HTMLElement;
+        // Hook on cell click to change the cell selection and the drop down (on unselected but also on selected cells, since
+        // cell selection can be toggled without regenerating the whole calendar)
+        const cells = calendarTable.querySelectorAll('td.calendar-level, td.calendar-selected');
+        cells.forEach(cell => {
+            // Set the onclick handler
+            cell.addEventListener('click', () => {
+                // Select the first date that matches in the drop down (since
+                // this is a date without time, there can be multiple matching
+                // diffs in the same day). No need to toggle the cell selection
+                // itself since the dropdown change handler takes care of that
+                logDbg('Cell clicked:', cell);
+                const cellFileTime = parseInt(cell.id.slice(cell.id.indexOf("-")+1));
+                // XXX store data-filetime in the option and do this search with
+                //     queryselector?
+                //     document.querySelector(`[data-filetime="${cellFileTime}"]`);
+                const selectEl = select.selectEl;
+                const options = selectEl.options;
+                for (let i = 0; i < options.length; i++) {
+                    let d = this.plugin.getEditDate(options[i].value);
+                    d = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+                    const optionFileTime = d.getTime();
+                    if (optionFileTime == cellFileTime) {
+                        if (i != selectEl.selectedIndex) {
+                            selectEl.selectedIndex = i;
+                            selectEl.trigger("change");
+                        }
+                        break;
+                    }
+                }
+            });
+        });
+        let revStats = calendarDiv.createEl("p");
+        // Fill in the stats now that all the information is available
+        // XXX Use human friendly units (KB, MB, GB, etc)
+        revStats.setText(
+            `${numFiles}/${filepaths.length} edit${(filepaths.length > 1) ? "s " : " "}` +
+            `${fileSize}/${(zipFile as TFile).stat.size} bytes compressed, ${this.app.workspace.getActiveFile()?.stat.size} note bytes`
+        );
+    }
+
+    async renderDiffsTimeline(zip: JSZip, dmpobj: DiffMatchPatch, filepaths: string[], selectedEdit: string, latestData: string, showWhitespace: boolean): Promise<string> {
+        // XXX This is expensive on files with lots of revisions, should have a
+        //     notice/modal and allow cancel?
+        let annots : string[] = [];
+        let lineToRefLine : number[] = [];
+        let lines : string[] = [];
+        let annotate = false;
+        let remainingAnnots = 0;
+        let data = latestData;
+        let newerData = latestData;
+        let prevFileDateStr = "";
+        for (let filepath of filepaths) {
+            // Loop over filepaths,
+            // - first rebuilding the file contents for the selectedEdit
+            // - once found, storing the time annotation for each line (ie time
+            //   of the edit that most recently modified that line)
+            const diff = await zip.file(filepath).async("string");
+            newerData = data;
+            if (this.plugin.getEditIsDiff(filepath)) {
+                // Rebuild the data from the diff applied to the current data
+                const patch = dmpobj.patch_fromText(diff);
+                data = dmpobj.patch_apply(patch, data)[0];
+            } else {
+                // The full file was stored, there's no diff
+                data = diff;
+            }
+            if (!annotate && (selectedEdit == filepath)) {
+                // Note split returns 2 for a string with a single \n, no need
+                // to +1
+                lines = data.split("\n");
+                const numLines = lines.length;
+                annots = new Array(numLines).fill("");
+                // lineToRefLine[i] : for line i of the current data, what is
+                // the line of the reference filepath. Could be -1 if the
+                // reference filepath doesn't contain that line and could have
+                // less than the reference lines if the current filepath doesn't
+                // contain that line
+                lineToRefLine = Array.from({ length: numLines + 1 }, (_, i) => i);
+                annotate = true;
+                prevFileDateStr = this.plugin.getEditLocalDateStr(filepath);  
+                remainingAnnots = annots.length;
+            } else if (annotate) {
+                // Get the diff to go from the newer version to the older
+                // version (backwards diff), so newer lines appear as deletions
+                // and viceversa (this allows to replace the line diff with with
+                // the stored diffs in the future, which also store a backwards
+                // diff)
+                // Use linemode since we are interested in full line changes,
+                // but note that line diffs still include carriage returns
+                // inside so they need to be looped over below
+                // XXX This should use the patch and not recreate the diff, but
+                //     patches are contextless and require tracking how lines
+                //     are inserted or deleted when the patch is applied
+                const diffs = dmpobj.diff_lineMode(newerData, data);
+                let line = 0;
+                for (const [op, diffData] of diffs) {
+                    for (let i=0; i<diffData.split("\n").length-1; ++i) {
+                        const refLine = lineToRefLine[line];
+                        switch (op as number) {
+                            case DiffOp.Delete:
+                                // If the old file doesn't have this line, it
+                                // means the new file inserted the line, annotate
+                                // as such unless it's already annotated
+                                lineToRefLine.splice(line, 1);
+                                if ((refLine != -1) && (annots[refLine] == "")) {
+                                    annots[refLine] = prevFileDateStr;
+                                    remainingAnnots--;
+                                }
+                            break;
+                            case DiffOp.Insert:
+                                // The new file doesn't have this line, it means
+                                // the new file deleted it, nothing to annotate,
+                                // but tag this line as not present 
+                                lineToRefLine.splice(line, 0, -1);
+                                line++;
+                            break;
+                            case DiffOp.Equal:
+                                line++;
+                            break;
+                        }
+                        // Early exit if all the lines have annotations. This is
+                        // unlikely to hit unless at some point the whole file
+                        // was rewritten
+                        if (remainingAnnots == 0) {
+                            break;
+                        }
+                    }
+                    if (remainingAnnots == 0) {
+                        break;
+                    }
+                }
+                prevFileDateStr = this.plugin.getEditLocalDateStr(filepath);
+            }
+        }
+
+        // Generate a table with the annotated file, time annotations on the
+        // left column and text lines on the right
+        let diffHtml: string = "<table>";
+        const fileDateStr = this.plugin.getEditLocalDateStr(selectedEdit);
+        for (let i=0; i < lines.length; ++i) {
+            const hdata1 = htmlEncode(annots[i], false);
+            const hdata2 = htmlEncode(lines[i], showWhitespace);
+
+            if (annots[i] == fileDateStr) {
+                // If the annotation date is the selectedEdit, tag as diff-line
+                // so it gets highlighted and can be navigated and counted as
+                // diff for stats display (but can only tag insertions,
+                // deletions are missing by definition of the timeline view)
+                
+                // XXX This causes the scroll to move when navigating by
+                //     clicking the time because the first diff-line is focused
+                //     when the select changes, which may undesirable since the
+                //     clicked time line may be scrolled out, fix?
+                diffHtml += `<tr class="diff-line"><td class="clickable diff-time">${hdata1}</td><td class="mod-right">${hdata2}</td></tr>`;
+            } else {
+                diffHtml += `<tr><td class="clickable diff-time ${(annots[i] == fileDateStr) ? "diff-line" : ""}">${hdata1}</td><td>${hdata2}</td></tr>`;
+            }
+        }
+        diffHtml += "</table>";
+
+        return diffHtml;
+    }
+
+    renderDiffsInline(diffs: Diff[], showWhitespace: boolean): string {
+        let diffHtml = "";
+        // This is equivalent to diff_prettyHtml, but that one inserts
+        // hard-coded background colors, use styles instead. See
+        // https://github.com/google/diff-match-patch/blob/master/javascript/diff_match_patch_uncompressed.js
+        for (const [op, data] of diffs) {
+            // Some Insert/Delete diffs are empty independently of
+            // calling diff_cleanupSemantic, ignore. See
+            // https://github.com/google/diff-match-patch/issues/105
+            if (data == "") {
+                continue;
+            }
+            let hdata = htmlEncode(data, showWhitespace);
+            switch (op as number) {
+                case  DiffOp.Delete:
+                    diffHtml += `<del class="diff-line mod-left">${hdata}</del>`;
+                break;
+                case DiffOp.Insert: 
+                    diffHtml += `<ins class="diff-line mod-right">${hdata}</ins>`;
+                break;
+                case DiffOp.Equal:
+                    diffHtml += `<span>${hdata}</span>`;
+                break;
+            }
+        }
+        return diffHtml;
+    }
+
+    renderDiffsSideOrTop(diffs: Diff[], sideBySide: boolean, showWhitespace: boolean): string {
+        // Group the diffs by carriage-terminated blocks of lines,
+        // display them in a table side by side or top by bottom
+
+        // For every diff, 
+        // - if it's an equal diff
+        //   - Append the first line to the current right and left
+        //     blocks, flush the blocks
+        //   - Initialize left and right to the last line
+        //   - Flush any in between lines as non-diff right and left
+        //     blocks
+        // - if it's a delete diff, accumulate into the left block
+        // - if it's an insertion diff, accumulate into right block and
+        //   flush if it ends in carriage return
+        
+        let left = "";
+        let right = "";
+        let diffHtml = '<table width="100%"><tbody>';
+        // Append a dummy terminator to detect the loop end and flush
+        for (const [op, data] of [...diffs, [DiffOp.Equal as number, ""] as Diff]) {
+            // Some Insert/Delete diffs are empty independently of
+            // calling diff_cleanupSemantic, ignore. See
+            // https://github.com/google/diff-match-patch/issues/105
+            // (don't remove empty Equal since it's used loop as
+            // terminator below)
+            if ((data == "") && ((op as number) != DiffOp.Equal)) {
+                continue;
+            }
+            let hdata = htmlEncode(data, showWhitespace);
+            // XXX Hack to guarantee a flush at the end, do it elsewhere
+            //     since it will add an spurious (but invisible in html)
+            //     carriage return
+            if (hdata == "") {
+                hdata = "\n";
+            }
+            switch (op as number) {
+                case DiffOp.Delete:
+                    left += `<del>${hdata}</del>`;
+                    // Don't flush even if it ends in a carriage return,
+                    // the right side is the one that tracks returns.
+                    // This will pair the deletion to the next insertion
+                    // or equal block (empirically looks like deletions
+                    // always appear before insertions, so this seems to
+                    // work fine).
+                    
+                    // XXX This could also assign deletions to the wrong
+                    //     block, but it's not deterministic what the
+                    //     proper block is anyway.
+                break;
+                case DiffOp.Insert:
+                    right += `<ins>${hdata}</ins>`;
+                    // Flush left and right if right ends in carriage
+                    // return, otherwise wait for a carriage return
+                    // either in an Insert or in an Equal diff. No need
+                    // to flush each line individually since it's
+                    // desirable to group the whole insertion in the
+                    // same block
+                    if (hdata.endsWith("\n")) {
+                        if (sideBySide) {
+                            diffHtml += `<tr class="diff-line"><td class="mod-left">${left}</td><td class="mod-right">${right}</td></tr>`;
+                        } else {
+                            diffHtml += `<tr class="diff-line"><td><div class="mod-left">${left}</div><div class="mod-right">${right}</td></tr>`;
+                        }
+                        left = "";
+                        right = "";
+                    }
+                break;
+                case DiffOp.Equal:
+                    let i;
+                    // Flush any pending left & right blocks upto the
+                    // first carriage return in the equal data,
+                    // inclusive
+                    i = hdata.indexOf("\n");
+                    if ((i != -1) && ((left != "") || (right != ""))) {
+                        let end = hdata.slice(0, i+1);
+                        left += end;
+                        right += end;
+                        hdata = hdata.slice(i+1);
+
+                        if (sideBySide) {
+                            diffHtml += `<tr class="diff-line"><td width="50%" class="mod-left">${left}</td><td width="50%" class="mod-right">${right}</td></tr>`;
+                        } else {
+                            diffHtml += `<tr class="diff-line"><td><div class="mod-left">${left}</div><div class="mod-right">${right}</div></td></tr>`;
+                        }
+                        left = "";
+                        right = "";
+                    }
+                    // Flush all the equal data upto the last carriage
+                    // return, inclusive
+                    i = hdata.lastIndexOf("\n");
+                    if (i != -1) {
+                        let start = hdata.slice(0, i+1);
+                        if (sideBySide) {
+                            diffHtml += `<tr><td>${start}</td><td>${start}</td></tr>`;
+                        } else {
+                            diffHtml += `<tr><td>${start}</td></tr>`;
+                        }
+                        hdata = hdata.slice(i+1);
+                    }
+                    // Append to left and right the equal data from the
+                    // last carriage return, exclusive 
+                    right += hdata;
+                    left += hdata;
+                break;
+            }
+        }
+        diffHtml += "</tbody></table>";
+        
+        return diffHtml;
+    }
+
+    async onOpen() {
+        const file = this.app.workspace.getActiveFile();
+
+        this.titleEl.setText("Edits for ");
+        this.titleEl.createEl("i", { text: file?.name });
+
+        this.modalEl.addClass("edit-history-modal");
+
+        const {contentEl} = this;        
+        contentEl.addClass("edit-history-modal-content");
+
         if ((file == null) || (!this.plugin.keepEditHistoryForFile(file))) {
             // XXX This should never happen since callers don't fire the modal?
             logWarn("Edit history not allowed for active file");
+            contentEl.createEl("p", { text: "No edit history"});
             return;
         }
 
         // Note this may differ from the last edit stored in the zip since not
         // all edits are stored in the file depending on the value of
         // this.minMsBetweenEdits
-        let latestData = await this.app.vault.read(file);
-
-        contentEl.addClass("edit-history-modal");
-        
-        this.titleEl.setText("Edits for ");
-        this.titleEl.createEl("i", { text: file.name });
-
+        const latestData = await this.app.vault.read(file);
+    
         // Create or open the zip with the edit history of this file
 
         // XXX Review perf notes at https://stuk.github.io/jszip/documentation/limitations.html
-        let zip: JSZip = new JSZip();
-        let zipFilepath = this.plugin.getEditHistoryFilepath(file.path);
+        const zip: JSZip = new JSZip();
+        const zipFilepath = this.plugin.getEditHistoryFilepath(file.path);
         logInfo("Opening zip file ", zipFilepath);
-        let zipFile = this.app.vault.getAbstractFileByPath(zipFilepath);
+        const zipFile = this.app.vault.getAbstractFileByPath(zipFilepath);
         if ((zipFile == null) || (!(zipFile instanceof TFile))) {
             logWarn("No history file or not a file", zipFilepath);
-            contentEl.createEl("p", { text: "No edit history"});
+            contentEl.createEl("p", { text: "No edit history file"});
             return;
         }
-
-        let zipData = await this.app.vault.readBinary(zipFile);
+        
+        const zipData = await this.app.vault.readBinary(zipFile);
         if (zipData == null) {
             logWarn("Unable to read history file");
             contentEl.createEl("p", { text: "No edit history"});
@@ -675,126 +1246,321 @@ class EditHistoryModal extends Modal {
 
         await zip.loadAsync(zipData);
 
-        let filepaths:string[] = [];
+        const filepaths:string[] = [];
         zip.forEach(function (relativePath:string) {
             filepaths.push(relativePath);
         });
         if (filepaths.length == 0) {
             logWarn("Empty edit history file");
-            contentEl.createEl("p", { text: "No edit history"});
+            contentEl.createEl("p", { text: "Empty edit history"});
             return;
         }
+        // Sort most recent first (although probably unnecessary since the zip
+        // seems to list in creation order already)
+        this.plugin.sortEdits(filepaths);
 
-        let revStats = contentEl.createEl("p");
+        const dmpobj = new DiffMatchPatch();
+
+        const calendarDiv = contentEl.createDiv();
+
         const control = contentEl.createDiv("setting-item-control");
         control.style.justifyContent = "flex-start";
         const select = new DropdownComponent(control);
         select.selectEl.focus();
-        const diffInfo = control.createEl("span");
-        this.diffInfo = diffInfo;
+
+        const diffDisplaySelect = new DropdownComponent(control)
+            .addOptions(diffDisplayFormatToString)
+            .setValue(this.plugin.settings.diffDisplayFormat)
+            .onChange(async () => {
+                select.selectEl.trigger("change");
+            });
         
-        // XXX Add prev and next diff buttons/hotkeys
-        new ButtonComponent(control)
+        const diffInfo: HTMLElement = control.createEl("span");
+        
+        const copyButton = new ButtonComponent(control)
             .setButtonText("Copy")
             .setClass("mod-cta")
             .onClick(() => {
                 logInfo("Copied to clipboard");
                 navigator.clipboard.writeText(this.currentVersionData);
-        });
+            });
 
-        contentEl.createEl("br");
-        contentEl.createEl("br");
+        const prevButton = new ButtonComponent(control)
+            .setButtonText("Previous")
+            .setClass("mod-cta")
+            .onClick(() => {
+                logInfo("Prev diff");
+                if (this.diffElements.length > 0) {
+                    // XXX Disable button on start instead of cycling?
+                    this.diffElements[this.curDiffIndex].removeClass("current");
+                    this.curDiffIndex = (this.curDiffIndex + this.diffElements.length - 1) % this.diffElements.length;
+                    this.diffElements[this.curDiffIndex].scrollIntoView({block: "center"});
+                    this.diffElements[this.curDiffIndex].addClass("current");
+                    diffInfo.setText((this.curDiffIndex + 1) + "/" + this.diffElements.length + " diff" + ((this.diffElements.length != 1) ? "s" : ""));
+                }
+            });
+
+        const nextButton = new ButtonComponent(control)
+            .setButtonText("Next")
+            .setClass("mod-cta")
+            .onClick(() => {
+                logInfo("Next diff");
+                if (this.diffElements.length > 0) {
+                    // XXX Disable button on end instead of cycling?
+                    this.diffElements[this.curDiffIndex].removeClass("current");
+                    this.curDiffIndex = (this.curDiffIndex + 1) % this.diffElements.length;
+                    this.diffElements[this.curDiffIndex].scrollIntoView({block: "center"});
+                    this.diffElements[this.curDiffIndex].addClass("current");
+                    diffInfo.setText((this.curDiffIndex + 1) + "/" + this.diffElements.length + " diff" + ((this.diffElements.length != 1) ? "s" : ""));
+                }
+            });
+
+        control.createEl("span").setText("Show whitespace");
+        const whitespaceCheckbox = new ToggleComponent(control) 
+            .setValue(this.plugin.settings.showWhitespace)
+            .onChange(async () => {
+                select.selectEl.trigger("change");
+            });
         
-        let diffDiv = contentEl.createDiv("diff-div");
+        contentEl.createEl("br");
+        contentEl.createEl("br");
+
+        // Set tabindex to 0 so it can receive key events
+        contentEl.setAttr("tabindex", 0);
+        contentEl.addEventListener("keydown", (event: KeyboardEvent) => {
+            // Hook on ctrl+arrow up/down and p/n for prev/next diff (don't use
+            // alt+up/down since it's used to unfold dropdowns)
+            logDbg("key", event);
+            const navigateDiff = event.ctrlKey && !event.shiftKey;
+            const navigateDate = event.ctrlKey && event.shiftKey;
+            if ((event.key === "p") || (navigateDiff && (event.key === 'ArrowUp'))) {
+                event.preventDefault();
+                prevButton.buttonEl.trigger("click");
+            } else if ((event.key === "P") || (navigateDate && (event.key === 'ArrowUp'))) {
+                event.preventDefault();
+                const nextIndex = select.selectEl.selectedIndex - 1;
+                if (nextIndex >= 0) {
+                    select.selectEl.selectedIndex = nextIndex;
+                    select.selectEl.trigger("change");
+                }
+            } else if ((event.key === "n")  || (navigateDiff && (event.key === 'ArrowDown'))) {
+                event.preventDefault();
+                nextButton.buttonEl.trigger("click");
+            } else if ((event.key === "N") || (navigateDate && (event.key === 'ArrowDown'))) {
+                event.preventDefault();
+                const nextIndex = select.selectEl.selectedIndex + 1;
+                if (nextIndex < select.selectEl.options.length) {
+                    select.selectEl.selectedIndex = nextIndex;
+                    select.selectEl.trigger("change");
+                }
+            } else if ((event.key === "c") && event.ctrlKey) {
+                event.preventDefault();
+                copyButton.buttonEl.trigger("click");
+            }
+        });
+        
+        const diffDiv = contentEl.createDiv("diff-div");
+        let selectedDayCell : HTMLElement|null = null;
         select.onChange( async () => {
-            // This is called both implicitly but also explicitly with a dummy
-            // event that cannot fill the necessary fields, don't access the
-            // event data and access the current select state instead 
+            // This is called implicitly from the event dispatcher but also
+            // explicitly via .trigger()
             // XXX Abstract out instead?
-            let selectedEdit = select.getValue();
+            const selectedEdit = select.getValue();
+
+            // Update the selected cell or the whole calendar if the cell is not
+            // found (ie calendar not rendered yet or year changed)
+            const selectedFileTime = this.plugin.getEditFileTime(selectedEdit);
+            const dayCell = document.getElementById(`calendar-${selectedFileTime}`) as HTMLElement|null;
+            if (dayCell) {
+                // Calendar already generated, highlight the new cell and
+                // lowlight the old one
+                if (selectedDayCell) {
+                    selectedDayCell.addClass("calendar-level");
+                    selectedDayCell.removeClass("calendar-selected");
+                }
+                selectedDayCell = dayCell;
+                selectedDayCell.addClass("calendar-selected");
+                selectedDayCell.removeClass("calendar-level");
+            } else {
+                this.renderCalendar(calendarDiv, select, zipFile as TFile, zip, filepaths);
+                selectedDayCell = document.getElementById(`calendar-${selectedFileTime}`) as HTMLElement|null;
+            }
 
             // Rebuild the file data of the given edit by applying the patches
             // in reverse, if one of the edits is stored fully, discard the
             // accumulated patched data and use the full data
-            let dmpobj = new DiffMatchPatch();
             let data = latestData;
-            let previousData = latestData;
+            let currentData = latestData;
+            let currentDiff = null;
 
+            // XXX This should cache currentData so sequentially traversing
+            //     filepaths doesn't need to recreate this, and even if it's not
+            //     sequential going to an earlier date can be done faster by
+            //     using a non-current previousData. Only do it for the lifetime
+            //     of the modal, so no need to keep one per each edited file.
+            let found = false;
+            let previousFound = false;
             for (let filepath of filepaths) {
+                // filepath contains the negative backward diff to go from the
+                // immediately newer date to filepath's date, need to
+                // reconstruct the data upto the selected filepath and also the
+                // immediately older one so the positive forward diff from older
+                // to selected can be displayed
                 let diff = await zip.file(filepath).async("string");
-
-                previousData = data;
-
+                
                 if (this.plugin.getEditIsDiff(filepath)) {
-                    // The full file was stored, there's no diff
-                    data = diff;
-                } else {
                     // Rebuild the data from the diff applied to the current
                     // data
                     let patch = dmpobj.patch_fromText(diff);
                     // XXX This could collect patches and apply them in a
-                    //     single call after the loop
+                    //     single call after the loop, not clear it's faster
                     data = dmpobj.patch_apply(patch, data)[0];
+                } else {
+                    // The full file was stored, there's no diff
+                    data = diff;
                 }
 
-                if (selectedEdit == filepath) {
-                    break
+                if (found) {
+                    previousFound = true;
+                    break;
                 }
+                found = (selectedEdit == filepath);
+
+                currentDiff = diff;
+                currentData = data;
             }
+            
+            // If selectedEdit is the oldest edit, it won't find a previous one
+            // to diff against, assume the previous is the empty file and diff
+            // against that (this will be incorrect if the plugin wasn't enabled
+            // when this file was created and already contained text, but
+            // there's nothing that can be done in that case)
+            if (!previousFound) {
+                data = "";
+            }
+
             // Display the diff against the latest edit
-            // XXX Have an option to diff against arbitrary edits?
+            // XXX Have an option to diff against an arbitrary non-sequential edit?
             // XXX This redoes the diff which shouldn't be necessary since
             //     we have all the patches, but it's not clear how to
             //     convert from patch to diff, looks like patch.diff is the
             //     set of diffs for a given patch? (but will still need to 
             //     re-diff when the whole file is saved instead of the diff)
-            this.currentVersionData = data;
-            let diffs = dmpobj.diff_main(data, previousData);
-            // XXX Number of diffs is not a great measurement, this could show
-            //     chars added/chars deleted
-            this.diffInfo.setText(diffs.length + " diff" + ((diffs.length != 1) ? "s" : ""));
-            // XXX Generating the HTML manually is pretty simple, roll our
-            //     own code instead of using diff_prettyHtml and having to
-            //     search/replace the styles and spaces below. See
-            //     https://github.com/google/diff-match-patch/blob/master/javascript/diff_match_patch_uncompressed.js
-            let diffHtml = dmpobj.diff_prettyHtml(diffs);
-            // Remove the styles used by prettyHtml
-            // <ins style="background:#e6ffe6;">
-            diffHtml = diffHtml.replace(/<ins [^>]*>/g, "<ins>");
-            // <del style="background:#ffe6e6;">
-            diffHtml = diffHtml.replace(/<del [^>]*>/g, "<del>");
+            // XXX Add fold/unfold before/after context lines to the UI like
+            //     file recovery does
+            let diffHtml = "";
+            // Store the currently selected version so it can be copied to
+            // clipboard from the copy button handler
+            this.currentVersionData = currentData;
+            const showWhitespace = whitespaceCheckbox.getValue();
+            // For side by side, getting line diffs via diff_lineMode could be
+            // used instead which would avoid having to find line breaks below,
+            // but using diff_main allows highlighting char-level diffs inside
+            // each line 
+            const diffs = dmpobj.diff_main(data, currentData);
+            dmpobj.diff_cleanupSemantic(diffs);
+            const diffDisplayFormat = diffDisplaySelect.getValue() as DiffDisplayFormat;
+            if (diffDisplayFormat == DiffDisplayFormat.Raw) {
+                // XXX Missing setting the 1/n diffcount that is displayed by
+                //     the dropdowns (maybe by counting @@ and dividing by 2?),
+                //     but it's currently extracted from diffElements.length, 
+                //     so that needs changing
+
+                // Note raw display of the diff looks counter-intuitive because
+                // the diff stores the difference between the version newer than
+                // filepath and filepath, which is a "negative forward" diff.
+                // Arguably it should show the "positive backward" diff between
+                // filepath and the version previous to filepath, but then it's
+                // not "raw"
+                let hdata = htmlEncode(currentDiff, showWhitespace);
+                diffHtml = "<tt>" + hdata + "</tt>";
+            } else if (diffDisplayFormat == DiffDisplayFormat.Timeline) {
+                diffHtml = await this.renderDiffsTimeline(zip, dmpobj, filepaths, selectedEdit, latestData, showWhitespace);
+            } else if (diffDisplayFormat == DiffDisplayFormat.Inline) {
+                diffHtml = this.renderDiffsInline(diffs, showWhitespace);
+            } else {
+                const sideBySide = (diffDisplayFormat == DiffDisplayFormat.Horizontal);
+                diffHtml = this.renderDiffsSideOrTop(diffs, sideBySide, showWhitespace);
+            }
+            // Remove carriage returns since <br> have been added in htmlEncode
+            // XXX Do this in htmlEncode but \n can't be removed right away
+            //     since it's used to detect end of line in side by side
+            //     displays above
+            diffHtml = diffHtml.replace(/\n/g, "");
+            
             // XXX Make colors configurable, in modal setting or per theme
             //     light/dark
             //     See https://github.com/friebetill/obsidian-file-diff/issues/1#issuecomment-1425157959
-            // XXX Have prev/next diff occurrence navigation
             // XXX Have a button to roll back to version
-            // XXX Have an option to remove end of paragraph chars
             // XXX innerHTML is discouraged for security reasons, change?
-            //     (note this is safe because it comes from diff_prettyHtml)
+            //     (note this is safe because diffHtml is escaped)
             //     See https://github.com/obsidianmd/obsidian-releases/blob/master/plugin-review.md#avoid-innerhtml-outerhtml-and-insertadjacenthtml
+            // XXX This is a performance hotspot, calls the internal parseHtml,
+            //     not clear this can be done faster by creating nodes manually
+            //     instead (chatgpt actually says parsing is faster). Creating
+            //     nodes and storing them would also also avoid calling
+            //     querySelectorAll below which is also a hotspot
             diffDiv.innerHTML = diffHtml;
-            // Diffs are spans of <ins> os <del> tags, scroll to the first one
-            diffDiv.querySelector<HTMLElement>("ins,del")?.scrollIntoView();
+            // Diffs are spans of <ins> or <del> tags, scroll to the first one
+            this.curDiffIndex = 0;
+            // diffElements is used for navigating prev/next diffs in all diff
+            // displays but Raw. diff-line marks added/deleted lines in side by
+            // side/top by bottom, individual changes in inline, and added lines
+            // in timeline
+            const diffElements = diffDiv.querySelectorAll<HTMLElement>(".diff-line");
+            this.diffElements = diffElements;
+            this.diffElements[this.curDiffIndex]?.scrollIntoView({block: "center"});
+            this.diffElements[this.curDiffIndex]?.addClass("current");
+            // XXX Number of diffs is ok for navigating but not a great
+            //     statistic, this could also show chars added/chars deleted?
+            diffInfo.setText((this.curDiffIndex + 1) + "/" + this.diffElements.length + " diff" + ((this.diffElements.length != 1) ? "s" : ""));
+            // Navigate edits on click in the timeline view
+            // XXX Clicking navigates the timeline "backwards", have a way of
+            //     navigating forwards?
+            const table = diffDiv.querySelector("table");
+            const cells = table?.querySelectorAll("td.diff-time");
+            cells?.forEach(cell => {
+                // Set the onclick handler
+                cell.addEventListener('click', () => {
+                    logDbg('Cell clicked:', cell);
+                    // cell contents are in the same format as the drop down
+                    const text = cell.textContent as string;
+                    // Select the first date that matches in the drop down
+                    // (since this is a date without time, there can be multiple
+                    // matching diffs in the same day)
+                    const selectEl = select.selectEl;
+                    const options = selectEl.options;
+                    for (let i = 0; i < options.length; i++) {
+                        if (options[i].text == text) {
+                            if (i != selectEl.selectedIndex) {
+                                selectEl.selectedIndex = i;
+                                selectEl.trigger("change");
+                            }
+                            break;
+                        }
+                    }
+                });
+            });
         });
 
-        // Sort most recent first (sorting is probably overkill since the zip
-        // seems to list in creation order already)
-        this.plugin.sortEdits(filepaths);
         // Create option entries
         for (let filepath of filepaths) {
-            const utcepoch = this.plugin.getEditEpoch(filepath);
-            const date = new Date(utcepoch);
-            select.addOption(filepath, date.toLocaleString());
+            // XXX The drop down displays the changes between the selected
+            //     date and the immediately older date
+            //     This means that:
+            //      -  the first entry should be a dummy entry with the current
+            //         contents date that displays the diff from the current
+            //         contents to the first file in the history (probably no
+            //         changes if a revision was recently saved)
+            //      - the last entry is a diff from that entry's date to the 
+            //        empty file
+            //     Missing setting the first dummy entry
+            select.addOption(filepath, this.plugin.getEditLocalDateStr(filepath));
         }
         // Force initialization done inside onChange
         select.selectEl.trigger("change");
         
-        // Fill in the stats now that all the information is available
-        // XXX Use human friendly units
-        revStats.setText( filepaths.length + " edit" + 
-            ((filepaths.length > 1) ? "s, " : ", ") + zipFile.stat.size + " bytes compressed, " + 
-            this.app.workspace.getActiveFile()?.stat.size + " note bytes");
-
+        // Update the status bar
         // XXX This shouldn't be here, but this is the best until it's done when
         //     switching panes, etc (or use a timer?)
         this.plugin.statusBarItemEl.setText(filepaths.length + " edits");
@@ -832,7 +1598,7 @@ class EditHistorySettingTab extends PluginSettingTab { plugin:
 
         new Setting(containerEl)
             .setName("Minimum seconds between edits")
-            .setDesc("Minimum number of seconds that must pass from the previous edit to store a new edit. Modifications done between those seconds will be merged into the next edit, reducing the edit history file size at the expense of less history granularity.")
+            .setDesc("Minimum number of seconds that must pass from the previous edit to store a new edit, set to 0 to disable. Modifications done between those seconds will be merged into the next edit, reducing the edit history file size at the expense of less history granularity.")
             .addText(text => text
                 .setPlaceholder(DEFAULT_SETTINGS.minSecondsBetweenEdits)
                 .setValue(this.plugin.settings.minSecondsBetweenEdits)
@@ -901,6 +1667,29 @@ class EditHistorySettingTab extends PluginSettingTab { plugin:
                     this.plugin.settings.showOnStatusBar = value;
                     await this.plugin.saveSettings();
                     this.plugin.statusBarItemEl.toggle(this.plugin.settings.showOnStatusBar);
+            }));
+
+        new Setting(containerEl)
+            .setName("Diff display type")
+            .setDesc("In the diff view, display the diff raw, timeline, inline, horizontally (side by side), or vertically (top by bottom).")
+            .addDropdown(dropdown => dropdown
+                .addOptions(diffDisplayFormatToString)
+                .setValue(this.plugin.settings.diffDisplayFormat)
+                .onChange(async (value) => {
+                    logInfo("Diff display position: " + value);
+                    this.plugin.settings.diffDisplayFormat = value;
+                    await this.plugin.saveSettings();
+            }));
+
+        new Setting(containerEl)
+            .setName("Show whitespace")
+            .setDesc("Show whitespace in the diff view.")
+            .addToggle(toggle => toggle
+                .setValue(this.plugin.settings.showWhitespace)
+                .onChange(async (value) => {
+                    logInfo("Show whitespace: " + value);
+                    this.plugin.settings.showWhitespace = value;
+                    await this.plugin.saveSettings();
             }));
 
         containerEl.createEl("h3", {text: "Debugging"});
