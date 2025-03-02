@@ -33,7 +33,7 @@ jobs:
             console.log("Stargazers", stargazers);
             console.log("User", issueUser, hasStarred);
             
-            return hasStarred;
+            return (hasStarred || (issueUser == repoOwner));
 
       - name: Add comment if user has not starred the repo
         if: steps.check_star.outputs.result == 'false'
