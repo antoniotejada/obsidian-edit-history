@@ -6,6 +6,7 @@ import {
     normalizePath, 
     Plugin, 
     PluginSettingTab, 
+    setIcon,
     Setting, 
     TAbstractFile, 
     TFile, 
@@ -136,6 +137,10 @@ const DEFAULT_SETTINGS: EditHistorySettings = {
 }
 
 const EDIT_HISTORY_FILE_EXT = ".edtz";
+
+// XXX Use Github actions to release plugin 
+//     See https://docs.obsidian.md/Plugins/Releasing/Release+your+plugin+with+GitHub+Actions
+//     See https://github.com/marcusolsson/obsidian-projects/blob/main/.github/workflows/release.yml
 
 // XXX Ignore changes if not enough diffs/too small?
 
@@ -836,7 +841,7 @@ class EditHistoryModal extends Modal {
         
         let month = 0;
         let monthColStart = 0;
-        calendarHtml += `<tr><td>${year}</td>`;
+        calendarHtml += `<thead><tr><th>${year}</th>`;
         
         // Generate the HTML for the month column headers, each month is a
         // variable number of columns depending on the day of the week the first
@@ -852,20 +857,20 @@ class EditHistoryModal extends Modal {
             // colspan is known, so it also needs to spill if the last column
             if ((month != d.getMonth()) || (col == numCols - 1)) {
                 const dd = new Date(d.getFullYear(), month, 1);
-                calendarHtml += `<td colspan="${(col - monthColStart)}">${dd.toLocaleDateString(undefined, { month: 'short' })}</td>`;
+                calendarHtml += `<th colspan="${(col - monthColStart)}">${dd.toLocaleDateString(undefined, { month: 'short' })}</th>`;
                 monthColStart = col;
                 month = d.getMonth();
             }
             d.setDate(d.getDate() + 7);
         }
-        calendarHtml += "</tr>";
+        calendarHtml += "</tr></thead><tbody>";
 
         // Generate HTML for the day cells, one cell per day, one day of the
         // week per row, one week per column
         for (let row = 0; row < numRows; ++row) {
             let d =  new Date(startDate);
             d.setDate(d.getDate() + row);
-            calendarHtml += `<tr><td>${d.toLocaleDateString(undefined, { weekday: 'short' })}</td>`;
+            calendarHtml += `<tr><th>${d.toLocaleDateString(undefined, { weekday: 'short' })}</th>`;
             for (let col = 0; col < numCols; ++col) {
                 // Month is 0-indexed and it's okay to overflow days in
                 // constructor, Typescript handles it
@@ -896,7 +901,7 @@ class EditHistoryModal extends Modal {
             }
             calendarHtml += "</tr>";
         }
-        calendarHtml += "</table>";
+        calendarHtml += "</tbody></table>";
         calendarDiv.innerHTML = calendarHtml;
         const calendarTable = calendarDiv.querySelector("table") as HTMLElement;
         // Hook on cell click to change the cell selection and the drop down (on unselected but also on selected cells, since
@@ -930,7 +935,7 @@ class EditHistoryModal extends Modal {
                 }
             });
         });
-        let revStats = calendarDiv.createEl("p");
+        let revStats = calendarDiv.createEl("small");
         // Fill in the stats now that all the information is available
         // XXX Use human friendly units (KB, MB, GB, etc)
         revStats.setText(
@@ -942,6 +947,8 @@ class EditHistoryModal extends Modal {
     async renderDiffsTimeline(zip: JSZip, dmpobj: DiffMatchPatch, filepaths: string[], selectedEdit: string, latestData: string, showWhitespace: boolean): Promise<string> {
         // XXX This is expensive on files with lots of revisions, should have a
         //     notice/modal and allow cancel?
+        // XXX Join all the same-day diffs and rebuild the diff in a single
+        //     call?
         let annots : string[] = [];
         let lineToRefLine : number[] = [];
         let lines : string[] = [];
@@ -991,11 +998,16 @@ class EditHistoryModal extends Modal {
                 // inside so they need to be looped over below
                 // XXX This should use the patch and not recreate the diff, but
                 //     patches are contextless and require tracking how lines
-                //     are inserted or deleted when the patch is applied
+                //     are inserted or deleted as if the patch were applied
                 const diffs = dmpobj.diff_lineMode(newerData, data);
                 let line = 0;
                 for (const [op, diffData] of diffs) {
-                    for (let i=0; i<diffData.split("\n").length-1; ++i) {
+                    // Counting diffs and diff_linemode above are by far the
+                    // hotspots of this function (eg 280ms and 170ms each).
+                    // For counting lines .split().length is 270ms vs.
+                    // .match().length 346ms
+                    const numLines = diffData.split("\n").length-1;
+                    for (let i=0; i < numLines; ++i) {
                         const refLine = lineToRefLine[line];
                         switch (op as number) {
                             case DiffOp.Delete:
@@ -1206,7 +1218,11 @@ class EditHistoryModal extends Modal {
 
         this.titleEl.setText("Edits for ");
         this.titleEl.createEl("i", { text: file?.name });
+        this.titleEl.createEl("span", { text: " " });
 
+        const calendarIcon = this.titleEl.createEl("span")
+        setIcon(calendarIcon, "calendar-plus-2");
+        
         this.modalEl.addClass("edit-history-modal");
 
         const {contentEl} = this;        
@@ -1260,8 +1276,20 @@ class EditHistoryModal extends Modal {
         this.plugin.sortEdits(filepaths);
 
         const dmpobj = new DiffMatchPatch();
+        
+        // XXX Allow searching in the diff text rendering
 
         const calendarDiv = contentEl.createDiv();
+        // The calendar is too tall for mobile, allow collapsing/expanding
+        calendarIcon.addEventListener('click', () => {
+            if (calendarDiv.style.display === "none") {
+                calendarDiv.style.display = "block";
+                setIcon(calendarIcon, "calendar-minus-2");
+            } else {
+                calendarDiv.style.display = "none";
+                setIcon(calendarIcon, "calendar-plus-2");
+            }
+        });
 
         const control = contentEl.createDiv("setting-item-control");
         control.style.justifyContent = "flex-start";
@@ -1276,7 +1304,9 @@ class EditHistoryModal extends Modal {
             });
         
         const diffInfo: HTMLElement = control.createEl("span");
-        
+
+        // XXX With the new buttons, this is too tall and too wide on mobile,
+        //     reorganize/resize/downscale font?
         const copyButton = new ButtonComponent(control)
             .setButtonText("Copy")
             .setClass("mod-cta")
@@ -1315,7 +1345,7 @@ class EditHistoryModal extends Modal {
                 }
             });
 
-        control.createEl("span").setText("Show whitespace");
+        control.createEl("span").setText("Whitespace");
         const whitespaceCheckbox = new ToggleComponent(control) 
             .setValue(this.plugin.settings.showWhitespace)
             .onChange(async () => {
@@ -1460,32 +1490,43 @@ class EditHistoryModal extends Modal {
             const diffs = dmpobj.diff_main(data, currentData);
             dmpobj.diff_cleanupSemantic(diffs);
             const diffDisplayFormat = diffDisplaySelect.getValue() as DiffDisplayFormat;
-            if (diffDisplayFormat == DiffDisplayFormat.Raw) {
-                // XXX Missing setting the 1/n diffcount that is displayed by
-                //     the dropdowns (maybe by counting @@ and dividing by 2?),
-                //     but it's currently extracted from diffElements.length, 
-                //     so that needs changing
+            switch (diffDisplayFormat) {
+                case DiffDisplayFormat.Raw:
+                    // XXX Missing setting the 1/n diffcount that is displayed
+                    //     by the dropdowns (maybe by counting @@ and dividing
+                    //     by 2?), but it's currently extracted from
+                    //     diffElements.length, so that needs changing
 
-                // Note raw display of the diff looks counter-intuitive because
-                // the diff stores the difference between the version newer than
-                // filepath and filepath, which is a "negative forward" diff.
-                // Arguably it should show the "positive backward" diff between
-                // filepath and the version previous to filepath, but then it's
-                // not "raw"
-                let hdata = htmlEncode(currentDiff, showWhitespace);
-                diffHtml = "<tt>" + hdata + "</tt>";
-            } else if (diffDisplayFormat == DiffDisplayFormat.Timeline) {
-                diffHtml = await this.renderDiffsTimeline(zip, dmpobj, filepaths, selectedEdit, latestData, showWhitespace);
-            } else if (diffDisplayFormat == DiffDisplayFormat.Inline) {
-                diffHtml = this.renderDiffsInline(diffs, showWhitespace);
-            } else {
-                const sideBySide = (diffDisplayFormat == DiffDisplayFormat.Horizontal);
-                diffHtml = this.renderDiffsSideOrTop(diffs, sideBySide, showWhitespace);
+                    // Note raw display of the diff looks counter-intuitive
+                    // because the diff stores the difference between the
+                    // version newer than filepath and filepath, which is a
+                    // "negative forward" diff. Arguably it should show the
+                    // "positive backward" diff between filepath and the version
+                    // previous to filepath, but then it's not "raw"
+                    let hdata = htmlEncode(currentDiff, showWhitespace);
+                    diffHtml = "<tt>" + hdata + "</tt>";
+                break;
+                case DiffDisplayFormat.Timeline:
+                    diffHtml = await this.renderDiffsTimeline(zip, dmpobj, filepaths, selectedEdit, latestData, showWhitespace);
+                break;
+                case DiffDisplayFormat.Inline:
+                    diffHtml = this.renderDiffsInline(diffs, showWhitespace);
+                break;
+                default:
+                    const sideBySide = (diffDisplayFormat == DiffDisplayFormat.Horizontal);
+                    diffHtml = this.renderDiffsSideOrTop(diffs, sideBySide, showWhitespace);
+                break;
             }
             // Remove carriage returns since <br> have been added in htmlEncode
             // XXX Do this in htmlEncode but \n can't be removed right away
             //     since it's used to detect end of line in side by side
             //     displays above
+            // XXX Removing carriage returns seems to be needed because in
+            //     styles.css .diff-div uses pre-wrap instead of just wrap in
+            //     order to preserve spaces/tabs so diff of a space is still
+            //     visible, but don't want to show carriage returns since
+            //     htmlEncode has converted them to <br>\n. Convert spaces/tabs
+            //     to nbsp in htmlEncode? Don't convert to <br> in htmlEncode?
             diffHtml = diffHtml.replace(/\n/g, "");
             
             // XXX Make colors configurable, in modal setting or per theme

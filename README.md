@@ -61,6 +61,10 @@ Each entry in the file is named after the UTC epoch in seconds at which time the
 
 [Github releases](https://github.com/antoniotejada/obsidian-edit-history/releases)
 
+### [0.2.1](https://github.com/antoniotejada/obsidian-edit-history/releases/tag/0.2.1) (2025-03-09)
+- Performance bugfix for timeline diff view
+- Calendar expand/collapse and other tweaks for small displays (mobile)
+
 ### [0.2.0](https://github.com/antoniotejada/obsidian-edit-history/releases/tag/0.2.0) (2025-02-25)
 - Implemented #8 https://github.com/antoniotejada/obsidian-edit-history/issues/8
   - Added side by side, top by bottom, inline, and timeline diff view and settings
