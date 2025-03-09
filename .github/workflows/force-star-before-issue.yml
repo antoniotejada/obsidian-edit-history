@@ -1,0 +1,64 @@
+name: Close Issue if Creator Didn't Star Repo
+
+on:
+  issues:
+    types: [opened, reopened]
+
+jobs:
+  check-star:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check if user has starred the repo
+        id: check_star
+        uses: actions/github-script@v6
+        with:
+          script: |
+            
+            const issueUser = context.payload.issue.user.login;
+            const repoOwner = context.repo.owner;
+            const repoName = context.repo.repo;
+            
+            // There's also 
+            //   github.rest.activity.checkRepoIsStarredByAuthenticatedUser
+            // but fails with "Unhandled error: HttpError: Resource not accessible by integration"
+            const stargazers = await github.paginate(
+              github.rest.activity.listStargazersForRepo, 
+              {
+                owner: repoOwner,
+                repo: repoName,
+                per_page: 100
+              }
+            );
+            const hasStarred = stargazers.some(star => star.login === issueUser);
+            console.log("Stargazers", stargazers);
+            console.log("User", issueUser, hasStarred);
+            
+            return (hasStarred || (issueUser == repoOwner));
+
+      - name: Add comment if user has not starred the repo
+        if: steps.check_star.outputs.result == 'false'
+        uses: actions/github-script@v6
+        with:
+          script: |
+            const issueNumber = context.payload.issue.number;
+            const issueUser = context.payload.issue.user.login;
+            const comment = `Hello @${issueUser}, in order to create issues in this repository, you need to star it first. Please star the repo and reopen the issue, thanks!.`;
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: issueNumber,
+              body: comment
+            });
+
+      - name: Close issue if user has not starred the repo
+        if: steps.check_star.outputs.result == 'false'
+        uses: actions/github-script@v6
+        with:
+          script: |
+            const issueNumber = context.payload.issue.number;
+            await github.rest.issues.update({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: issueNumber,
+              state: 'closed'
+            });
