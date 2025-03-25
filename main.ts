@@ -4,6 +4,7 @@ import {
     DropdownComponent,
     Modal, 
     normalizePath, 
+    Notice,
     Plugin, 
     PluginSettingTab, 
     setIcon,
@@ -800,20 +801,25 @@ class EditHistoryModal extends Modal {
         const year = this.plugin.getEditDate(selectedEdit).getFullYear();
         
         let calendarHtml = '<table class="calendar">';
-        let fileTimes = new Set<number>();
-        let fileTimeToDiffCount = new Map<number, number>();
+        let fileTimeToEditCount = new Map<number, number>();
         let fileSize = 0;
         let numFiles = 0;
 
-        // Collect the times of all edits in the given year
+        // Collect the times of all edits in the given year, note it's possible
+        // filepaths is empty when the file hasn't been saved yet. 
+        // XXX Ideally this should also add the current time if note contents
+        //     different from last stored, but this needs the cell clicking code
+        //     to be able to respond to that date. Eventually this function
+        //     should just take a list of days and shades, or the shade and
+        //     clicking done in the caller after calendar building? 
         for (let fp of filepaths) {
             // XXX filepaths are sorted by decreasing date, could binary search
             //     to the selected year, probably overkill?
             let d = this.plugin.getEditDate(fp);
             if (d.getFullYear() == year) {
                 const t = this.plugin.getEditFileTime(fp);
-                fileTimes.add(t);
-                fileTimeToDiffCount.set(t, (fileTimeToDiffCount.get(t) || 0) + 1);
+                const count = fileTimeToEditCount.get(t) || 0;
+                fileTimeToEditCount.set(t, count + 1);
                 fileSize += this.plugin.getEditCompressedSize(zip, fp);
                 numFiles++;
             } else if (d.getFullYear() < year) {
@@ -822,18 +828,23 @@ class EditHistoryModal extends Modal {
                 break;
             }
         }
-        const diffCounts = Array.from(fileTimeToDiffCount.values());
-        const maxFileDiffCount = Math.max(...diffCounts);
-        const minFileDiffCount = Math.min(...diffCounts);
-        const diffCountRange = maxFileDiffCount - minFileDiffCount + 1;
-        const maxShades = 6;
+        // Shade the days looking at how many edits there were for the given day
+        // Note this doesn't count diffs inside an edit, but edits in a day,
+        // since counting diffs would require uncompressing and parsing all
+        // edits in the day, which is expensive
+        const editCounts = Array.from(fileTimeToEditCount.values());
+        const maxFileEditCount = Math.max(...editCounts);
+        const minFileEditCount = Math.min(...editCounts);
+        const editCountRange = maxFileEditCount - minFileEditCount;
+        const maxShade = 5; // From 0 to maxShade shade levels
         const selectedFileTime = this.plugin.getEditFileTime(selectedEdit);
         const firstDayOfYear = new Date(year, 0, 1);
         const startDate = new Date(year, 0, 1 - firstDayOfYear.getDay());
         // one row per day of the week
         const numRows = 7;
-        // setDate(0) sets the day of the month to 0, which causes
-        // typescript to adjust it to the last day of the previous month
+        // Check if the last day of February is 29 by setting the day of the
+        // March (0-based) to 0, which typescript adjusts to the last day of the
+        // previous month
         const leapDelta =  new Date(year, 2, 0).getDate() - 28;
         // need to show at least 365 days plus padding for previous year
         // plus leap
@@ -852,9 +863,9 @@ class EditHistoryModal extends Modal {
         let d = new Date(startDate);
         d.setDate(d.getDate() + 6);
         for (let col = 0; col < numCols; ++col) {
-            // Spill the previous month if this column ends in a new
-            // month, this is done after the fact since that's when
-            // colspan is known, so it also needs to spill if the last column
+            // Spill the previous month if this column ends in a new month, this
+            // is done after the fact since that's when colspan is known, so it
+            // also needs to spill if the last column
             if ((month != d.getMonth()) || (col == numCols - 1)) {
                 const dd = new Date(d.getFullYear(), month, 1);
                 calendarHtml += `<th colspan="${(col - monthColStart)}">${dd.toLocaleDateString(undefined, { month: 'short' })}</th>`;
@@ -869,34 +880,30 @@ class EditHistoryModal extends Modal {
         // week per row, one week per column
         for (let row = 0; row < numRows; ++row) {
             let d =  new Date(startDate);
+            // It's okay to overflow days in setDate, Typescript does carry over
             d.setDate(d.getDate() + row);
             calendarHtml += `<tr><th>${d.toLocaleDateString(undefined, { weekday: 'short' })}</th>`;
             for (let col = 0; col < numCols; ++col) {
-                // Month is 0-indexed and it's okay to overflow days in
-                // constructor, Typescript handles it
                 const t = d.getTime();
-                let count = 0;
+                const count = fileTimeToEditCount.get(t) || 0;
+                // Note month is 0-based
                 let styleClass = "calendar-empty-"  +  ((d.getMonth() & 1) ? "odd" : "even");
+                let tooltip = d.toLocaleDateString();
                 if (d.getFullYear() != year) {
+                    // Note count is zero in this case, since only times in the
+                    // current year are counted
                     styleClass = "calendar-black";
-                } else if (fileTimes.has(t)) {
-                    count = fileTimeToDiffCount.get(t) || 0;
-                    // XXX Verify this for when there are less changes than
-                    //     levels, which levels to pick (specifically what level
-                    //     is picked if only one change)
-                    // XXX Fix this for when there are no changes (can happen
-                    //     for the first date if the stored file matches the
-                    //     current file contents and there are no other edits
-                    //     that day)
-                    const shadeLevel = Math.round(((count-minFileDiffCount) * maxShades) / diffCountRange);
+                } else if (count > 0) {
+                    const shadeLevel = (editCountRange == 0) ? maxShade : Math.round(((count-minFileEditCount) * maxShade) / editCountRange);
                     if (t == selectedFileTime) {
                         styleClass = "calendar-selected ";
                     } else {
                         styleClass = "calendar-level ";
                     }
                     styleClass += "clickable level-" + shadeLevel;
+                    tooltip += ` (${count} edits)`;
                 } 
-                calendarHtml += `<td id="calendar-${t}" class="${styleClass}" title="${d.toLocaleDateString()}${(count == 0) ? '' : ' (' + count + ' edits)' }"></td>`;
+                calendarHtml += `<td id="calendar-${t}" class="${styleClass}" title="${tooltip}"></td>`;
                 d.setDate(d.getDate()+7);
             }
             calendarHtml += "</tr>";
@@ -904,8 +911,9 @@ class EditHistoryModal extends Modal {
         calendarHtml += "</tbody></table>";
         calendarDiv.innerHTML = calendarHtml;
         const calendarTable = calendarDiv.querySelector("table") as HTMLElement;
-        // Hook on cell click to change the cell selection and the drop down (on unselected but also on selected cells, since
-        // cell selection can be toggled without regenerating the whole calendar)
+        // Hook on cell click to change the cell selection and the drop down (on
+        // unselected but also on selected cells, since cell selection can be
+        // toggled without regenerating the whole calendar)
         const cells = calendarTable.querySelectorAll('td.calendar-level, td.calendar-selected');
         cells.forEach(cell => {
             // Set the onclick handler
@@ -945,10 +953,7 @@ class EditHistoryModal extends Modal {
     }
 
     async renderDiffsTimeline(zip: JSZip, dmpobj: DiffMatchPatch, filepaths: string[], selectedEdit: string, latestData: string, showWhitespace: boolean): Promise<string> {
-        // XXX This is expensive on files with lots of revisions, should have a
-        //     notice/modal and allow cancel?
-        // XXX Join all the same-day diffs and rebuild the diff in a single
-        //     call?
+        
         let annots : string[] = [];
         let lineToRefLine : number[] = [];
         let lines : string[] = [];
@@ -957,11 +962,45 @@ class EditHistoryModal extends Modal {
         let data = latestData;
         let newerData = latestData;
         let prevFileDateStr = "";
-        for (let filepath of filepaths) {
+        
+        let notice = null;
+
+        let nextReportPct = 0;
+        const reportIntervalPct = 5;
+        const startTime = Date.now();
+        for (const [ifp, filepath] of filepaths.entries()) {
+            // Timeline can take a long time with lots of edits, report, but
+            // only every few iterations to avoid unnecessary overhead
+            // XXX Find a way to allow cancel?
+            // XXX Decrease execution time by doing coarse timeline that only
+            //     shows per day diffs? (merge all edits done the same day,
+            //     rebuilding the diff in a single call and pointing the click
+            //     to the first or last edit of that day)
+            const pct = Math.round((100*ifp)/filepaths.length);
+            if (pct >= nextReportPct) {
+                if (nextReportPct == reportIntervalPct) {
+                    // On the first progress report, check if the estimate of
+                    // the whole work will be over a given threshold (this
+                    // prevents the notice quickly flashing with files with few
+                    // edits) and report if so
+                    const currentTime = Date.now();
+                    if (((currentTime - startTime) * 100 / nextReportPct) > 1000) {
+                        // Create a notice to report progress, set duration to
+                        // zero to prevent the notice from disappearing while
+                        // still working, hide explicitly below when done.
+                        notice = new Notice("", 0);
+                    }
+                }
+                // Note this may not reach 100% if the loop early exists below,
+                // but it's very unlikely
+                notice?.setMessage(`Computing timeline ${pct}%`);
+                nextReportPct += reportIntervalPct;
+            }
             // Loop over filepaths,
             // - first rebuilding the file contents for the selectedEdit
-            // - once found, storing the time annotation for each line (ie time
-            //   of the edit that most recently modified that line)
+            // - once found, keep rebuilding versions and also store the time
+            //   annotation for each line (ie time of the edit that most
+            //   recently modified that line)
             const diff = await zip.file(filepath).async("string");
             newerData = data;
             if (this.plugin.getEditIsDiff(filepath)) {
@@ -1070,6 +1109,8 @@ class EditHistoryModal extends Modal {
             }
         }
         diffHtml += "</table>";
+
+        notice?.hide();
 
         return diffHtml;
     }
@@ -1221,6 +1262,8 @@ class EditHistoryModal extends Modal {
         this.titleEl.createEl("span", { text: " " });
 
         const calendarIcon = this.titleEl.createEl("span")
+        // XXX This icon is not visible on mobile on some older versions,
+        //     find out which version and increase the required version?
         setIcon(calendarIcon, "calendar-plus-2");
         
         this.modalEl.addClass("edit-history-modal");
@@ -1352,9 +1395,6 @@ class EditHistoryModal extends Modal {
                 select.selectEl.trigger("change");
             });
         
-        contentEl.createEl("br");
-        contentEl.createEl("br");
-
         // Set tabindex to 0 so it can receive key events
         contentEl.setAttr("tabindex", 0);
         contentEl.addEventListener("keydown", (event: KeyboardEvent) => {
