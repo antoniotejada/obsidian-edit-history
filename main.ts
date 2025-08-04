@@ -117,6 +117,7 @@ interface EditHistorySettings {
     maxHistoryFileSizeKB: string;
     editHistoryRootFolder: string;
     extensionWhitelist: string;
+    substringBlacklist: string;
     showOnStatusBar: boolean;
     diffDisplayFormat: string;
     showWhitespace: boolean;
@@ -131,6 +132,7 @@ const DEFAULT_SETTINGS: EditHistorySettings = {
     maxHistoryFileSizeKB: "0",
     editHistoryRootFolder: "",
     extensionWhitelist: ".md, .txt, .csv, .htm, .html",
+    substringBlacklist: "",
     showOnStatusBar: true,
     diffDisplayFormat: DiffDisplayFormat.Inline,
     showWhitespace: true,
@@ -181,6 +183,10 @@ export default class EditHistory extends Plugin {
     // Whitelist of note filename extensions to store edit history for. In
     // lowercase and including the initial dot. Empty for all.
     extensionWhitelist: string[];
+    // Blacklist of note filepath substrings not to store edit history for. In
+    // lowercase, empty for none. Note obsidian normalizes paths to use forward
+    // slash, so substrings for paths should use forward slashes
+    substringBlacklist: string[];
     // For now this should be "", other values work but the UX is not clear
     // because the folder will be visible and the user may move it around
     // breaking things
@@ -199,6 +205,18 @@ export default class EditHistory extends Plugin {
         // modified using the Obsidian API, trap it so it's ignored downstream
         if (file.name.endsWith(EDIT_HISTORY_FILE_EXT)) {
             return false;
+        }
+
+        // Don't keep edit history file for filepaths containing the substring
+        // blacklist
+        if (this.substringBlacklist.length > 0) {
+            const filepath = file.path.toLowerCase();
+            for (let substring of this.substringBlacklist) {
+                if (filepath.contains(substring)) {
+                    logInfo("Not keeping history file '" + filepath + "' due to blacklist substring '" + substring + "'");
+                    return false;
+                }
+            }
         }
 
         // Keep an edit history file for all files if there are no extensions,
@@ -276,6 +294,21 @@ export default class EditHistory extends Plugin {
         filenames.sort((a,b) => i * (this.getEditEpoch(b) - this.getEditEpoch(a)));
     }
 
+    commaSeparatedToList(s: string) {
+        let list : string[] = [];
+        // typescript string.split() returns 1-element array with empty item if
+        // s is empty, return empty list instead. Note if s is whitespace still
+        // want to return a single element list with a whitespace item.
+        if (s != "") {
+            list = s.split(",");
+            for (let i in list) {
+                list[i] = list[i].trim().toLowerCase();
+            }
+        }
+        
+        return list;
+    }
+
     parseSettings(settings: EditHistorySettings) {
         // Hook log functions as early as possible so any console output is seen
         // if enabled
@@ -284,13 +317,10 @@ export default class EditHistory extends Plugin {
         this.minMsBetweenEdits = parseInt(settings.minSecondsBetweenEdits) * 1000 || Infinity; 
         this.maxEdits = parseInt(settings.maxEdits) || Infinity;
         this.maxEditAgeMs = parseInt(settings.maxEditAge) * 1000 || Infinity;
-        let extensionWhitelist = settings.extensionWhitelist.split(",");
-        for (let i in extensionWhitelist) {
-            extensionWhitelist[i] = extensionWhitelist[i].trim().toLowerCase();
-        }
-        // XXX This needs to remove all edit history files when extensions are
-        //     removed?
-        this.extensionWhitelist = extensionWhitelist;
+        // XXX This needs to remove all edit history files when
+        //     extensions/substrings are removed/added?
+        this.extensionWhitelist = this.commaSeparatedToList(settings.extensionWhitelist)
+        this.substringBlacklist = this.commaSeparatedToList(settings.substringBlacklist);
         this.maxEditHistoryFileSize = parseInt(settings.maxHistoryFileSizeKB) * 1024 || Infinity;
         // XXX Note this is currently not updated in the settings modal, so the
         //     value is unchanged
@@ -324,6 +354,15 @@ export default class EditHistory extends Plugin {
                 logDbg("Ignoring non whitelisted file", fileOrFolder.path);
                 return;
             }
+
+            if ((this.minMsBetweenEdits == Infinity) && !force) {
+                // Don't generate a history file when manual saving is on until
+                // it's done manually. This prevents generating empty history
+                // files below for files that may never be manually saved
+                logDbg("Ignoring due to manual saving enabled")
+                return;
+            }
+
             let file = fileOrFolder as TFile;
             let zipFilepath = this.getEditHistoryFilepath(file.path);
             let zipFile = this.app.vault.getAbstractFileByPath(zipFilepath);
@@ -1727,7 +1766,7 @@ class EditHistorySettingTab extends PluginSettingTab { plugin:
 
         new Setting(containerEl)
             .setName("File extension whitelist")
-            .setDesc("List of file extensions to store edits for. Empty to store edits for all files.\nNote if an extension is removed, old edit history files will need to be removed manually.")
+            .setDesc("Comma separated list of file extensions to store edits for (case insensitive). Empty to store edits for all files.\nNote if an extension is removed, old edit history files will need to be removed manually.")
             .addText(text => text
                 .setPlaceholder(DEFAULT_SETTINGS.extensionWhitelist)
                 .setValue(this.plugin.settings.extensionWhitelist)
@@ -1736,6 +1775,18 @@ class EditHistorySettingTab extends PluginSettingTab { plugin:
                     this.plugin.settings.extensionWhitelist = value;
                     await this.plugin.saveSettings();
                 }));
+                
+        new Setting(containerEl)
+                .setName("Filepath substring blacklist")
+                .setDesc("Comma separated list of substrings of note filepaths to not store edits for (case insensitive). Empty to store edits for all files.\nUse forward slashes as folder separator\nNote if a substring is added, old edit history files will need to be removed manually.")
+                .addText(text => text
+                    .setPlaceholder(DEFAULT_SETTINGS.substringBlacklist)
+                    .setValue(this.plugin.settings.substringBlacklist)
+                    .onChange(async (value) => {
+                        logInfo("File substring blacklist: '" + value + "'");
+                        this.plugin.settings.substringBlacklist = value;
+                        await this.plugin.saveSettings();
+                    }));
 
         containerEl.createEl("h3", {text: "Appearance"});
         new Setting(containerEl)

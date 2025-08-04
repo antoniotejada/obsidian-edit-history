@@ -29,6 +29,7 @@ This is similar to the [File Recovery](https://help.obsidian.md/Plugins/File+rec
   - deleted when the note is deleted
 - Edit history files can be safely deleted outside of Obsidian in order to free storage.
 - Keep edit history files for all files or just for the extensions specified in the settings
+- Don't keep edit history files for those filepaths containing the substrings specified in the settings
 
 
 ## Usage
@@ -60,6 +61,10 @@ Each entry in the file is named after the UTC epoch in seconds at which time the
 ## Versions
 
 [Github releases](https://github.com/antoniotejada/obsidian-edit-history/releases)
+
+### [0.3.0](https://github.com/antoniotejada/obsidian-edit-history/releases/tag/0.3.0) (2025-08-03)
+- Implemented #6 note path substring blacklist
+- Fixed #28 empty edit history files being when minMsBetweenEdits is infinity (manual saving)
 
 ### [0.2.2](https://github.com/antoniotejada/obsidian-edit-history/releases/tag/0.2.2) (2025-03-25)
 - Shades bugfix for timeline

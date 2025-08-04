@@ -1,0 +1,133 @@
+/* 
+ * Styles for Edit History plugin
+ */
+
+ /* Show the history modal at modal dimensions, this prevents the dialog
+    from growing/shrinking depending on the diff contents */
+ .modal.edit-history-modal {
+     width: var(--modal-width);
+     height: var(--modal-height);
+ }
+
+/* Modal displaying the edit history */
+.edit-history-modal-content {
+    display: flex;
+    overflow: hidden;
+    flex-direction: column;
+}
+
+/* Div displaying the diff inside the edit history modal */
+.edit-history-modal-content .diff-div {
+    /* Set styles to scroll the div, not the parent modal */
+    flex-grow: 1;
+    flex-shrink: 1;
+    flex-basis: auto;
+    height: 100%;
+    overflow-y: scroll;
+    user-select: text;
+    /* Preserve spaces/tabs so diffs of those are visible (but still line-wrap
+    long text) */
+    white-space: pre-wrap;
+    /* Wrap anywhere so there's no horizontal scrollbar, especially necessary
+    for side by side diffs since they are too wide otherwise */
+    overflow-wrap: anywhere;
+}
+
+.edit-history-modal-content {
+    --edit-history-background-del-rgb: var(--background-modifier-error-rgb);
+    --edit-history-background-ins-rgb: var(--background-modifier-success-rgb);
+    --edit-history-background-calendar-full-rgb: var(--background-modifier-success-rgb);
+    --edit-history-background-calendar-selected-rgb: var(--background-modifier-error-rgb);
+    --edit-history-background-calendar-odd: var(--color-base-70);
+    --edit-history-background-calendar-even: var(--color-base-60);
+}
+
+/* Remove the padding from the default diff-line */
+.edit-history-modal-content .diff-div .diff-line {
+    /* padding: 0 var(--size-4-2); */
+    padding: 0 0;
+}
+.edit-history-modal-content .diff-div .diff-line .mod-left {
+    background-color: rgba(var(--edit-history-background-del-rgb), 0.2);
+}
+.edit-history-modal-content .diff-div .diff-line .mod-left del {
+    background-color: rgba(var(--edit-history-background-del-rgb), 0.4);
+}
+/* Currently highlighted line (side by side) */
+.edit-history-modal-content .diff-div .diff-line.current .mod-left {
+    background-color: rgba(var(--edit-history-background-del-rgb), 0.5);
+}
+/* Currently highlighted diff (non side by side) */
+.edit-history-modal-content .diff-div del.diff-line.current  {
+    background-color: rgba(var(--edit-history-background-del-rgb), 0.8);
+}
+
+.edit-history-modal-content .diff-div .diff-line .mod-right {
+    background-color: rgba(var(--edit-history-background-ins-rgb), 0.2);
+}
+.edit-history-modal-content .diff-div .diff-line .mod-right ins {
+    background-color: rgba(var(--edit-history-background-ins-rgb), 0.4);
+}
+/* Currently highlighted line (side by side) */
+.edit-history-modal-content .diff-div .diff-line.current .mod-right  {
+    background-color: rgba(var(--edit-history-background-ins-rgb), 0.5);
+}
+/* Currently highlighted diff (non side by side) */
+.edit-history-modal-content .diff-div ins.diff-line.current  {
+    background-color: rgba(var(--edit-history-background-ins-rgb), 0.8);
+}
+
+/* Calendar headers */
+.edit-history-modal-content .calendar th {
+    width: 10px;
+    line-height: 10px;
+    font-size: small;
+    font-weight: normal;
+}
+/* Calendar background for odd months */
+.edit-history-modal-content td.calendar-empty-odd {
+    background-color: var(--edit-history-background-calendar-odd);
+}
+/* Calendar background for even months */
+.edit-history-modal-content td.calendar-empty-even {
+    background-color: var(--edit-history-background-calendar-even);
+}
+.edit-history-modal-content .calendar td {
+    width: 10px;
+    line-height: 10px;
+    font-size: small;
+}
+/* Shades of a cell */
+/* XXX This is only for unselected cells, have shades for the selected cell too? */
+.edit-history-modal-content td.calendar-level.level-0 {
+    background-color: rgba(var(--edit-history-background-calendar-full-rgb), 0.2);
+}
+.edit-history-modal-content td.calendar-level.level-1 {
+    background-color: rgba(var(--edit-history-background-calendar-full-rgb), 0.4);
+}
+.edit-history-modal-content td.calendar-level.level-2 {
+    background-color: rgba(var(--edit-history-background-calendar-full-rgb), 0.6);
+}
+.edit-history-modal-content td.calendar-level.level-3 {
+    background-color: rgba(var(--edit-history-background-calendar-full-rgb), 0.8);
+}
+.edit-history-modal-content td.calendar-level.level-4 {
+    background-color: rgba(var(--edit-history-background-calendar-full-rgb), 0.9);
+}
+.edit-history-modal-content td.calendar-level.level-5 {
+    background-color: rgba(var(--edit-history-background-calendar-full-rgb), 1.0);
+}
+.edit-history-modal-content td.calendar-selected {
+    background-color: rgba(var(--edit-history-background-calendar-selected-rgb), 1.0);
+}
+.edit-history-modal-content td.calendar-black {
+    /* background-color: #000000; */
+}
+.edit-history-modal-content .clickable {
+    cursor: pointer;
+}
+/* Time in timeline view */
+.edit-history-modal-content td.diff-time {
+    white-space: nowrap;
+    font-family: 'Courier New', Courier, monospace;
+}
