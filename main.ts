@@ -739,10 +739,6 @@ export default class EditHistory extends Plugin {
             logInfo("vault delete path", file.path);
             // This reports any files or folders modified via the api, ignore
             // non whitelisted files/folders
-            if (this.settings.keepDeletedFileHistory) {
-                logDbg("Keeping history for deleted file", file.path);
-                return;
-            }            
             if (!(this.keepEditHistoryForFile(file))) {
                 logDbg("Ignoring non whitelisted file", file.path);
                 return;
@@ -750,6 +746,19 @@ export default class EditHistory extends Plugin {
             // Delete the edit history file if any
             let zipFilepath = this.getEditHistoryFilepath(file.path);
             let zipFile = this.app.vault.getAbstractFileByPath(zipFilepath);
+            if (zipFile && this.settings.keepDeletedFileHistory) {
+                logDbg("Keeping history for deleted file", file.path);
+                const now = new Date();
+                const timestamp = now.getFullYear() +
+                    String(now.getMonth() + 1).padStart(2, "0") +
+                    String(now.getDate()).padStart(2, "0") +
+                    String(now.getHours()).padStart(2, "0") +
+                    String(now.getMinutes()).padStart(2, "0") +
+                    String(now.getSeconds()).padStart(2, "0");
+                zipFilepath = zipFilepath.replace(".edtz", `.${timestamp}.edtz`);
+                this.app.vault.rename(zipFile, zipFilepath);
+                return;
+            }            
             if (zipFile != null) {
                 logInfo("Deleting edit history file", zipFilepath);
                 this.app.fileManager.trashFile(zipFile);
