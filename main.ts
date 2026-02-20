@@ -752,10 +752,7 @@ export default class EditHistory extends Plugin {
             let zipFile = this.app.vault.getAbstractFileByPath(zipFilepath);
             if (zipFile != null) {
                 logInfo("Deleting edit history file", zipFilepath);
-                // XXX Should this trash instead of delete? (the Obsidian
-                //     setting under Files and Links allows choosing between
-                //     system trash, obsidian trash and delete)
-                this.app.vault.delete(zipFile);
+                this.app.fileManager.trashFile(zipFile);
             }
         }));
 
