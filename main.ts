@@ -118,6 +118,7 @@ interface EditHistorySettings {
     editHistoryRootFolder: string;
     extensionWhitelist: string;
     substringBlacklist: string;
+    keepDeletedFileHistory: boolean;
     showOnStatusBar: boolean;
     diffDisplayFormat: string;
     showWhitespace: boolean;
@@ -133,6 +134,7 @@ const DEFAULT_SETTINGS: EditHistorySettings = {
     editHistoryRootFolder: "",
     extensionWhitelist: ".md, .txt, .csv, .htm, .html",
     substringBlacklist: "",
+    keepDeletedFileHistory: true,
     showOnStatusBar: true,
     diffDisplayFormat: DiffDisplayFormat.Inline,
     showWhitespace: true,
@@ -737,6 +739,10 @@ export default class EditHistory extends Plugin {
             logInfo("vault delete path", file.path);
             // This reports any files or folders modified via the api, ignore
             // non whitelisted files/folders
+            if (this.settings.keepDeletedFileHistory) {
+                logDbg("Keeping history for deleted file", file.path);
+                return;
+            }            
             if (!(this.keepEditHistoryForFile(file))) {
                 logDbg("Ignoring non whitelisted file", file.path);
                 return;
@@ -1787,6 +1793,17 @@ class EditHistorySettingTab extends PluginSettingTab { plugin:
                         this.plugin.settings.substringBlacklist = value;
                         await this.plugin.saveSettings();
                     }));
+        
+        new Setting(containerEl)
+            .setName("Keep deleted file history")
+            .setDesc("Deleted files will keep their edit history even after deletion. Disable to delete the edit history file when the original file is deleted to reduce storage.")
+            .addToggle(toggle => toggle
+                .setValue(this.plugin.settings.keepDeletedFileHistory)
+                .onChange(async value => {
+                    logInfo("Keep deleted file history: " + value);
+                    this.plugin.settings.keepDeletedFileHistory = value;
+                    await this.plugin.saveSettings();
+                }));
 
         containerEl.createEl("h3", {text: "Appearance"});
         new Setting(containerEl)
