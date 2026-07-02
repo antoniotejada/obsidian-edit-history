@@ -28,7 +28,8 @@ This is similar to the [File Recovery](https://help.obsidian.md/Plugins/File+rec
   - renamed when the note is renamed (including folder changes).
   - deleted when the note is deleted
 - Edit history files can be safely deleted outside of Obsidian in order to free storage.
-- Keep edit history files for all files or just for the extensions specified in the settings
+- Keep edit history files for all files or just for the file types picked in the settings, with the file types found in the vault offered as one-click chips
+- Optionally scan the vault daily or weekly and get notified when files with new extensions appear
 - Don't keep edit history files for those filepaths containing the substrings specified in the settings
 
 

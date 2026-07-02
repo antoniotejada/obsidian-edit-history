@@ -9,9 +9,10 @@ import {
     PluginSettingTab, 
     setIcon,
     Setting, 
-    TAbstractFile, 
-    TFile, 
-    TFolder, 
+    TAbstractFile,
+    TextComponent,
+    TFile,
+    TFolder,
     ToggleComponent
 } from "obsidian";
 import { DiffMatchPatch, Diff } from "diff-match-patch-ts";
@@ -117,6 +118,13 @@ interface EditHistorySettings {
     maxHistoryFileSizeKB: string;
     editHistoryRootFolder: string;
     extensionWhitelist: string;
+    // Comma separated list of extensions ever seen in the vault by the
+    // extension scan, so new extensions can be detected and notified
+    knownExtensions: string;
+    // How often to scan the vault for new extensions: "off", "daily", "weekly"
+    extensionScanInterval: string;
+    // Epoch in milliseconds of the last extension scan, 0 if never scanned
+    lastExtensionScanTime: number;
     substringBlacklist: string;
     showOnStatusBar: boolean;
     diffDisplayFormat: string;
@@ -131,7 +139,10 @@ const DEFAULT_SETTINGS: EditHistorySettings = {
     maxEdits: "0",
     maxHistoryFileSizeKB: "0",
     editHistoryRootFolder: "",
-    extensionWhitelist: ".md, .base, .canvas, .txt, .csv, .htm, .html",
+    extensionWhitelist: ".md, .base, .canvas, .txt, .csv, .json, .yaml, .yml, .js, .css, .htm, .html",
+    knownExtensions: "",
+    extensionScanInterval: "weekly",
+    lastExtensionScanTime: 0,
     substringBlacklist: "",
     showOnStatusBar: true,
     diffDisplayFormat: DiffDisplayFormat.Inline,
@@ -183,6 +194,9 @@ export default class EditHistory extends Plugin {
     // Whitelist of note filename extensions to store edit history for. In
     // lowercase and including the initial dot. Empty for all.
     extensionWhitelist: string[];
+    // Extensions ever seen in the vault by the extension scan. In lowercase
+    // and including the initial dot.
+    knownExtensions: string[];
     // Blacklist of note filepath substrings not to store edit history for. In
     // lowercase, empty for none. Note obsidian normalizes paths to use forward
     // slash, so substrings for paths should use forward slashes
@@ -309,6 +323,121 @@ export default class EditHistory extends Plugin {
         return list;
     }
 
+    /**
+     * @return the extension in canonical whitelist form: trimmed, lowercase,
+     *         with the initial dot, or "" if there's nothing left after
+     *         cleaning up
+     */
+    normalizeExtension(ext: string): string {
+        ext = ext.trim().toLowerCase().replace(/^\.+/, "");
+        return (ext == "") ? "" : "." + ext;
+    }
+
+    /**
+     * @return sorted list of the extensions of all the files currently in the
+     *         vault, in canonical whitelist form, ignoring edit history files
+     *         and files without extension
+     */
+    getVaultExtensions(): string[] {
+        const exts = new Set<string>();
+        for (const file of this.app.vault.getFiles()) {
+            if (file.name.endsWith(EDIT_HISTORY_FILE_EXT)) {
+                continue;
+            }
+            if (file.extension != "") {
+                exts.add("." + file.extension.toLowerCase());
+            }
+        }
+        return Array.from(exts).sort();
+    }
+
+    /**
+     * Scan the vault for extensions not seen in previous scans and record them
+     * in the known extensions setting. Extensions stay known even if all files
+     * with that extension are later deleted, so they are not re-notified and
+     * can still be re-added from the settings.
+     *
+     * @param notify show a Notice if new extensions are found
+     * @return the list of extensions new to this scan
+     */
+    async scanVaultExtensions(notify: boolean): Promise<string[]> {
+        const known = new Set(this.knownExtensions);
+        const newExtensions = this.getVaultExtensions().filter(ext => !known.has(ext));
+
+        this.settings.lastExtensionScanTime = Date.now();
+        if (newExtensions.length > 0) {
+            newExtensions.forEach(ext => known.add(ext));
+            this.settings.knownExtensions = Array.from(known).sort().join(", ");
+            if (notify) {
+                // Empty whitelist means all files are stored
+                const stored = (this.extensionWhitelist.length == 0) ||
+                    newExtensions.every(ext => this.extensionWhitelist.includes(ext));
+                new Notice("Edit History: new file types found in the vault: " +
+                    newExtensions.join(", ") + "\nEdits for these are " +
+                    (stored ? "" : "not ") +
+                    "being stored, review the tracked file types in the Edit History settings.");
+            }
+        }
+        await this.saveSettings();
+
+        logInfo("scanVaultExtensions new extensions", newExtensions);
+        return newExtensions;
+    }
+
+    /**
+     * Run the periodic extension scan if it's enabled and due. The first ever
+     * scan just records the current extensions without notifying, so vaults
+     * updating to this version aren't notified about extensions that were
+     * already there.
+     */
+    async scanVaultExtensionsIfDue() {
+        // The first scan seeds the baseline silently, even when the periodic
+        // scan is off, so the settings can show the untracked file types and a
+        // later first periodic scan doesn't notify about pre-existing ones
+        if (this.settings.lastExtensionScanTime == 0) {
+            await this.scanVaultExtensions(false);
+            return;
+        }
+        const scanIntervalMs = { "daily" : 24 * 60 * 60 * 1000, "weekly" : 7 * 24 * 60 * 60 * 1000 }[this.settings.extensionScanInterval];
+        if (scanIntervalMs == undefined) {
+            // "off" or unknown value
+            return;
+        }
+        if (Date.now() - this.settings.lastExtensionScanTime >= scanIntervalMs) {
+            await this.scanVaultExtensions(true);
+        }
+    }
+
+    async addTrackedExtension(ext: string) {
+        ext = this.normalizeExtension(ext);
+        if (ext == "") {
+            return;
+        }
+        const list = this.commaSeparatedToList(this.settings.extensionWhitelist).filter(e => e != "");
+        if (!list.includes(ext)) {
+            list.push(ext);
+            this.settings.extensionWhitelist = list.join(", ");
+            // Make sure a manually added extension can be re-added from the
+            // untracked row if it's later removed, even if no file with that
+            // extension exists in the vault yet
+            const known = new Set(this.knownExtensions);
+            if (!known.has(ext)) {
+                known.add(ext);
+                this.settings.knownExtensions = Array.from(known).sort().join(", ");
+            }
+            await this.saveSettings();
+        }
+    }
+
+    async removeTrackedExtension(ext: string) {
+        // Remove both the raw and the normalized form, so legacy whitelist
+        // entries without the initial dot can be removed too
+        const normalized = this.normalizeExtension(ext);
+        const list = this.commaSeparatedToList(this.settings.extensionWhitelist).filter(e => (e != "") && (e != ext) && (e != normalized));
+        this.settings.extensionWhitelist = list.join(", ");
+        await this.saveSettings();
+    }
+
     parseSettings(settings: EditHistorySettings) {
         // Hook log functions as early as possible so any console output is seen
         // if enabled
@@ -320,6 +449,7 @@ export default class EditHistory extends Plugin {
         // XXX This needs to remove all edit history files when
         //     extensions/substrings are removed/added?
         this.extensionWhitelist = this.commaSeparatedToList(settings.extensionWhitelist)
+        this.knownExtensions = this.commaSeparatedToList(settings.knownExtensions);
         this.substringBlacklist = this.commaSeparatedToList(settings.substringBlacklist);
         this.maxEditHistoryFileSize = parseInt(settings.maxHistoryFileSizeKB) * 1024 || Infinity;
         // XXX Note this is currently not updated in the settings modal, so the
@@ -806,6 +936,12 @@ export default class EditHistory extends Plugin {
             }
         });
 
+
+        // Scan for new file extensions once the vault index is ready, then
+        // check hourly whether the daily/weekly scan is due (for vaults that
+        // stay open across days)
+        this.app.workspace.onLayoutReady(() => { this.scanVaultExtensionsIfDue(); });
+        this.registerInterval(window.setInterval(() => { this.scanVaultExtensionsIfDue(); }, 60 * 60 * 1000));
 
         this.addSettingTab(new EditHistorySettingTab(this.app, this));
     }
@@ -1764,18 +1900,113 @@ class EditHistorySettingTab extends PluginSettingTab { plugin:
                     await this.plugin.saveSettings();
                 }));
 
+        const whitelist = this.plugin.commaSeparatedToList(this.plugin.settings.extensionWhitelist).filter(e => e != "");
+
+        let addExtensionText: TextComponent;
+        const addExtension = async () => {
+            const value = addExtensionText.getValue();
+            if (value.trim() != "") {
+                logInfo("Adding tracked file type: " + value);
+                await this.plugin.addTrackedExtension(value);
+                this.display();
+            }
+        };
         new Setting(containerEl)
-            .setName("File extension whitelist")
-            .setDesc("Comma separated list of file extensions to store edits for (case insensitive). Empty to store edits for all files.\nNote if an extension is removed, old edit history files will need to be removed manually.")
-            .addText(text => text
-                .setPlaceholder(DEFAULT_SETTINGS.extensionWhitelist)
-                .setValue(this.plugin.settings.extensionWhitelist)
+            .setName("Tracked file types")
+            .setDesc("Edits are stored for files with these extensions (case insensitive). Click an extension to stop tracking it, use the text box to track a new one. If no extensions are listed, edits are stored for ALL files.\nNote if an extension stops being tracked, old edit history files will need to be removed manually.")
+            .addText(text => {
+                addExtensionText = text;
+                text.setPlaceholder(".xyz");
+                text.inputEl.addEventListener("keydown", (e: KeyboardEvent) => {
+                    if (e.key == "Enter") {
+                        e.preventDefault();
+                        addExtension();
+                    }
+                });
+            })
+            .addExtraButton(button => button
+                .setIcon("plus")
+                .setTooltip("Track file type")
+                .onClick(addExtension));
+
+        const trackedDiv = containerEl.createDiv("edit-history-chips");
+        if (whitelist.length == 0) {
+            trackedDiv.createSpan({ cls: "edit-history-chips-empty", text: "No file types listed, edits are stored for all files." });
+            const seedButton = trackedDiv.createEl("button", { text: "Track only the file types currently in the vault" });
+            seedButton.onclick = async () => {
+                logInfo("Seeding tracked file types from vault");
+                this.plugin.settings.extensionWhitelist = this.plugin.getVaultExtensions().join(", ");
+                await this.plugin.saveSettings();
+                this.display();
+            };
+        } else {
+            for (const ext of whitelist) {
+                const chip = trackedDiv.createSpan("edit-history-chip");
+                chip.createSpan({ text: ext });
+                setIcon(chip.createSpan("edit-history-chip-icon"), "x");
+                chip.setAttribute("aria-label", "Stop tracking " + ext);
+                chip.onclick = async () => {
+                    logInfo("Removing tracked file type: " + ext);
+                    await this.plugin.removeTrackedExtension(ext);
+                    this.display();
+                };
+            }
+        }
+
+        // Offer every extension ever seen in the vault, minus the tracked
+        // ones, so a just-untracked extension can be re-tracked even if no
+        // file with that extension exists in the vault anymore
+        const untracked = Array.from(new Set([...this.plugin.knownExtensions, ...this.plugin.getVaultExtensions()]))
+            .filter(ext => !whitelist.includes(ext))
+            .sort();
+
+        new Setting(containerEl)
+            .setName("Untracked file types")
+            .setDesc("File types seen in this vault that are not tracked. Click an extension to start tracking it.");
+        const untrackedDiv = containerEl.createDiv("edit-history-chips");
+        if (whitelist.length == 0) {
+            untrackedDiv.createSpan({ cls: "edit-history-chips-empty", text: "All file types are currently tracked." });
+        } else if (untracked.length == 0) {
+            untrackedDiv.createSpan({ cls: "edit-history-chips-empty", text: "None." });
+        } else {
+            for (const ext of untracked) {
+                const chip = untrackedDiv.createSpan({ cls: ["edit-history-chip", "edit-history-chip-untracked"] });
+                chip.createSpan({ text: ext });
+                setIcon(chip.createSpan("edit-history-chip-icon"), "plus");
+                chip.setAttribute("aria-label", "Track " + ext);
+                chip.onclick = async () => {
+                    logInfo("Adding tracked file type: " + ext);
+                    await this.plugin.addTrackedExtension(ext);
+                    this.display();
+                };
+            }
+        }
+
+        new Setting(containerEl)
+            .setName("Scan for new file types")
+            .setDesc("Periodically scan the vault for file types not seen before and show a notification when some are found. The scan runs when the vault is opened and while it stays open, whenever the chosen interval has passed since the last scan.")
+            .addDropdown(dropdown => dropdown
+                .addOption("off", "Never")
+                .addOption("daily", "Daily")
+                .addOption("weekly", "Weekly")
+                .setValue(this.plugin.settings.extensionScanInterval)
                 .onChange(async (value) => {
-                    logInfo("File extension whitelist: " + value);
-                    this.plugin.settings.extensionWhitelist = value;
+                    logInfo("Extension scan interval: " + value);
+                    this.plugin.settings.extensionScanInterval = value;
                     await this.plugin.saveSettings();
+                }))
+            .addExtraButton(button => button
+                .setIcon("search")
+                .setTooltip("Scan now")
+                .onClick(async () => {
+                    const newExtensions = await this.plugin.scanVaultExtensions(false);
+                    new Notice((newExtensions.length > 0) ?
+                        "New file types found in the vault: " + newExtensions.join(", ") :
+                        "No new file types found in the vault");
+                    this.display();
                 }));
-                
+
+
         new Setting(containerEl)
                 .setName("Filepath substring blacklist")
                 .setDesc("Comma separated list of substrings of note filepaths to not store edits for (case insensitive). Empty to store edits for all files.\nUse forward slashes as folder separator\nNote if a substring is added, old edit history files will need to be removed manually.")

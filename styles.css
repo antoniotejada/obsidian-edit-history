@@ -2,6 +2,54 @@
  * Styles for Edit History plugin
  */
 
+/* Rows of file type chips in the settings tab */
+.edit-history-chips {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--size-4-2);
+    padding: var(--size-4-2) 0 var(--size-4-4) 0;
+    border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.edit-history-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--size-2-1);
+    padding: var(--size-2-1) var(--size-4-2);
+    border-radius: var(--radius-l);
+    background-color: var(--background-modifier-hover);
+    font-size: var(--font-ui-small);
+    cursor: pointer;
+    user-select: none;
+}
+
+.edit-history-chip:hover {
+    background-color: var(--background-modifier-active-hover);
+}
+
+.edit-history-chip-untracked {
+    background-color: transparent;
+    border: 1px dashed var(--background-modifier-border-hover);
+    color: var(--text-muted);
+}
+
+/* Vertically center the x/plus icon in the chip */
+.edit-history-chip-icon {
+    display: inline-flex;
+    align-items: center;
+}
+
+.edit-history-chip-icon svg {
+    width: var(--font-ui-small);
+    height: var(--font-ui-small);
+}
+
+.edit-history-chips-empty {
+    font-size: var(--font-ui-small);
+    color: var(--text-muted);
+}
+
  /* Show the history modal at modal dimensions, this prevents the dialog
     from growing/shrinking depending on the diff contents */
  .modal.edit-history-modal {
