@@ -131,7 +131,7 @@ const DEFAULT_SETTINGS: EditHistorySettings = {
     maxEdits: "0",
     maxHistoryFileSizeKB: "0",
     editHistoryRootFolder: "",
-    extensionWhitelist: ".md, .txt, .csv, .htm, .html",
+    extensionWhitelist: ".md, .base, .canvas, .txt, .csv, .htm, .html",
     substringBlacklist: "",
     showOnStatusBar: true,
     diffDisplayFormat: DiffDisplayFormat.Inline,
