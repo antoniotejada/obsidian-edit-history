@@ -346,7 +346,13 @@ export default class EditHistory extends Plugin {
 
         logInfo("onLoad");
 
-        this.registerEvent(this.app.vault.on("modify", async (fileOrFolder: TAbstractFile, force: boolean = false) => {
+        // Serialize modify handling per history file path. Obsidian can fire
+        // "modify" again (or a forced save can be triggered) while a previous
+        // save is still doing its async read-modify-write of the zip; without
+        // this a later invocation reads a stale zip and clobbers the edit the
+        // in-flight one is about to write. Each path is run as a promise chain.
+        const modifyQueue = new Map<string, Promise<void>>();
+        const processModify = async (fileOrFolder: TAbstractFile, force: boolean = false) => {
             logInfo("vault modify", fileOrFolder.path);
             // This reports any files or folders modified via the api, ignore
             // non whitelisted files/folders
@@ -675,8 +681,18 @@ export default class EditHistory extends Plugin {
             }
             // XXX This needs to update when switching panes, etc, or set a timer
             this.statusBarItemEl.setText((numEdits + 1) + " edits");
+        };
+        this.registerEvent(this.app.vault.on("modify", (fileOrFolder: TAbstractFile, force: boolean = false) => {
+            const path = fileOrFolder.path;
+            const next = (modifyQueue.get(path) ?? Promise.resolve())
+                .then(() => processModify(fileOrFolder, force))
+                .catch((e) => logError("Error saving edit history for", path, e));
+            modifyQueue.set(path, next);
+            // Drop the entry once this invocation is the tail of the chain so
+            // the map doesn't grow unbounded
+            next.finally(() => { if (modifyQueue.get(path) === next) { modifyQueue.delete(path); } });
         }));
-        
+
         this.registerEvent(this.app.vault.on("rename", (file: TAbstractFile, oldPath: string) => {
             logInfo("vault rename path", file.path);
             // This reports any files or folders modified via the api, ignore
