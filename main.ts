@@ -70,7 +70,8 @@ function debugbreak() {
  const htmlChars :  { [key: string]: string } = {
     "&" : "&amp;",
     "\"": "&quot;",
-    "'/": '&#39;',
+    "'": '&#39;',
+    "/": '&#x2F;',
     "<" : '&lt;',
     ">": '&gt;',
     "\n": "<br>\n",
