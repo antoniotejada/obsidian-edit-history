@@ -248,9 +248,28 @@ export default class EditHistory extends Plugin {
         // The only way of getting the file size is by accessing
         // the internal field _data
         // See https://github.com/Stuk/jszip/issues/247
-        return zip.file(filepath)._data.compressedSize;
+        const file = zip.file(filepath);
+        // Guard against a missing entry (eg the name doesn't round trip after
+        // normalization) or an unexpected JSZip internal shape, so callers in
+        // the purge and calendar paths don't throw on a corrupt history file
+        if ((file == null) || (file._data == null)) {
+            logWarn("Unable to get compressed size for edit", filepath);
+            return 0;
+        }
+        return file._data.compressedSize;
     }
-    
+
+    /**
+     * @return true if the zip entry name is a well formed edit filename, ie a
+     *         base36 UTC epoch optionally ending in "$" for full entries. Entry
+     *         names come from the (possibly externally synced or corrupt) edit
+     *         history file, validate them before parsing so a bad name can't
+     *         inject a NaN epoch into sorting, purging, or the calendar.
+     */
+    isValidEditFilename(editFilename: string): boolean {
+        return /^[0-9a-z]+\$?$/.test(editFilename) && Number.isFinite(this.getEditEpoch(editFilename));
+    }
+
     getEditEpoch(editFilename: string): number {
         return parseInt(editFilename, 36) * 1000;
     }
@@ -499,6 +518,10 @@ export default class EditHistory extends Plugin {
                 zip.forEach(function (relativePath:string, file: JSZip.JSZipObject) {
                     filepaths.push(relativePath);
                 });
+                // Ignore entries that aren't well formed edit filenames so a
+                // corrupt or externally tampered history file can't corrupt the
+                // purge ordering (NaN epochs make the sort non deterministic)
+                filepaths = filepaths.filter(fp => this.isValidEditFilename(fp));
 
                 // Sort most recent first
                 this.sortEdits(filepaths);
@@ -1344,10 +1367,14 @@ class EditHistoryModal extends Modal {
 
         await zip.loadAsync(zipData);
 
-        const filepaths:string[] = [];
+        let filepaths:string[] = [];
         zip.forEach(function (relativePath:string) {
             filepaths.push(relativePath);
         });
+        // Ignore entries that aren't well formed edit filenames so a corrupt or
+        // externally tampered history file can't produce NaN dates in the
+        // calendar/timeline rendering
+        filepaths = filepaths.filter(fp => this.plugin.isValidEditFilename(fp));
         if (filepaths.length == 0) {
             logWarn("Empty edit history file");
             contentEl.createEl("p", { text: "Empty edit history"});
