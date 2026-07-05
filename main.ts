@@ -346,12 +346,22 @@ export default class EditHistory extends Plugin {
 
         logInfo("onLoad");
 
-        // Serialize modify handling per history file path. Obsidian can fire
-        // "modify" again (or a forced save can be triggered) while a previous
-        // save is still doing its async read-modify-write of the zip; without
-        // this a later invocation reads a stale zip and clobbers the edit the
-        // in-flight one is about to write. Each path is run as a promise chain.
-        const modifyQueue = new Map<string, Promise<void>>();
+        // Serialize all vault event handling through a single FIFO queue.
+        // Obsidian delivers the modify/rename/delete callbacks synchronously in
+        // order but does not await them, so the async handler bodies can
+        // otherwise interleave and even finish out of order across event types
+        // (eg an in-flight modify writing back the old history file path after
+        // a rename has already moved it). Enqueuing synchronously in the event
+        // callback and running each task to completion before the next keeps
+        // the handlers running in Obsidian's delivery order, which is the
+        // correct one. Edits are human-paced so serializing across files costs
+        // nothing in practice.
+        let handlerQueue: Promise<void> = Promise.resolve();
+        const enqueue = (task: () => Promise<void>): void => {
+            handlerQueue = handlerQueue
+                .then(task)
+                .catch((e) => logError("Error in edit history vault handler", e));
+        };
         const processModify = async (fileOrFolder: TAbstractFile, force: boolean = false) => {
             logInfo("vault modify", fileOrFolder.path);
             // This reports any files or folders modified via the api, ignore
@@ -683,17 +693,10 @@ export default class EditHistory extends Plugin {
             this.statusBarItemEl.setText((numEdits + 1) + " edits");
         };
         this.registerEvent(this.app.vault.on("modify", (fileOrFolder: TAbstractFile, force: boolean = false) => {
-            const path = fileOrFolder.path;
-            const next = (modifyQueue.get(path) ?? Promise.resolve())
-                .then(() => processModify(fileOrFolder, force))
-                .catch((e) => logError("Error saving edit history for", path, e));
-            modifyQueue.set(path, next);
-            // Drop the entry once this invocation is the tail of the chain so
-            // the map doesn't grow unbounded
-            next.finally(() => { if (modifyQueue.get(path) === next) { modifyQueue.delete(path); } });
+            enqueue(() => processModify(fileOrFolder, force));
         }));
 
-        this.registerEvent(this.app.vault.on("rename", (file: TAbstractFile, oldPath: string) => {
+        const processRename = async (file: TAbstractFile, oldPath: string) => {
             logInfo("vault rename path", file.path);
             // This reports any files or folders modified via the api, ignore
             // non whitelisted files/folders
@@ -745,11 +748,17 @@ export default class EditHistory extends Plugin {
             if (zipFile != null) {
                 let newZipFilepath = this.getEditHistoryFilepath(file.path);
                 logInfo("Renaming edit history file", zipFilepath,"to", newZipFilepath);
-                this.app.vault.rename(zipFile, newZipFilepath);
+                await this.app.vault.rename(zipFile, newZipFilepath);
             }
+        };
+        // oldPath is a stable string; file.path is read when the task runs but
+        // by then any earlier-enqueued modify has already flushed to the old
+        // path, so the history file exists to be moved
+        this.registerEvent(this.app.vault.on("rename", (file: TAbstractFile, oldPath: string) => {
+            enqueue(() => processRename(file, oldPath));
         }));
 
-        this.registerEvent(this.app.vault.on("delete", (file: TAbstractFile) => {
+        const processDelete = async (file: TAbstractFile) => {
             logInfo("vault delete path", file.path);
             // This reports any files or folders modified via the api, ignore
             // non whitelisted files/folders
@@ -765,8 +774,11 @@ export default class EditHistory extends Plugin {
                 // XXX Should this trash instead of delete? (the Obsidian
                 //     setting under Files and Links allows choosing between
                 //     system trash, obsidian trash and delete)
-                this.app.vault.delete(zipFile);
+                await this.app.vault.delete(zipFile);
             }
+        };
+        this.registerEvent(this.app.vault.on("delete", (file: TAbstractFile) => {
+            enqueue(() => processDelete(file));
         }));
 
         // XXX Use notices for some information/error messages
