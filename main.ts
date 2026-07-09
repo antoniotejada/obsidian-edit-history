@@ -362,7 +362,7 @@ export default class EditHistory extends Plugin {
                 .then(task)
                 .catch((e) => logError("Error in edit history vault handler", e));
         };
-        const processModify = async (fileOrFolder: TAbstractFile, force: boolean = false) => {
+        const processModify = async (fileOrFolder: TAbstractFile, force: boolean = false, enqueuedPath?: string) => {
             logInfo("vault modify", fileOrFolder.path);
             // This reports any files or folders modified via the api, ignore
             // non whitelisted files/folders
@@ -380,7 +380,14 @@ export default class EditHistory extends Plugin {
             }
 
             let file = fileOrFolder as TFile;
-            let zipFilepath = this.getEditHistoryFilepath(file.path);
+            // Use the note path captured when this modify was enqueued, not the
+            // live file.path: a rename queued behind this modify mutates
+            // file.path before this runs, which would send the history file to
+            // the post-rename path and collide with the rename handler's move
+            // (leaving an orphan). The captured path keeps the history file
+            // where the note was when the edit happened; the rename handler then
+            // moves it to the new path.
+            let zipFilepath = this.getEditHistoryFilepath(enqueuedPath ?? file.path);
             let zipFile = this.app.vault.getAbstractFileByPath(zipFilepath);
             if ((zipFile != null) && !(zipFile instanceof TFile)) {
                 // Not a file, error
@@ -693,7 +700,10 @@ export default class EditHistory extends Plugin {
             this.statusBarItemEl.setText((numEdits + 1) + " edits");
         };
         this.registerEvent(this.app.vault.on("modify", (fileOrFolder: TAbstractFile, force: boolean = false) => {
-            enqueue(() => processModify(fileOrFolder, force));
+            // Capture the path now, at enqueue time, so a rename that lands
+            // before this modify is dequeued can't redirect the history file
+            const enqueuedPath = fileOrFolder.path;
+            enqueue(() => processModify(fileOrFolder, force, enqueuedPath));
         }));
 
         const processRename = async (file: TAbstractFile, oldPath: string) => {
