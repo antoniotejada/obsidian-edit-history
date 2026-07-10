@@ -346,7 +346,23 @@ export default class EditHistory extends Plugin {
 
         logInfo("onLoad");
 
-        this.registerEvent(this.app.vault.on("modify", async (fileOrFolder: TAbstractFile, force: boolean = false) => {
+        // Serialize all vault event handling through a single FIFO queue.
+        // Obsidian delivers the modify/rename/delete callbacks synchronously in
+        // order but does not await them, so the async handler bodies can
+        // otherwise interleave and even finish out of order across event types
+        // (eg an in-flight modify writing back the old history file path after
+        // a rename has already moved it). Enqueuing synchronously in the event
+        // callback and running each task to completion before the next keeps
+        // the handlers running in Obsidian's delivery order, which is the
+        // correct one. Edits are human-paced so serializing across files costs
+        // nothing in practice.
+        let handlerQueue: Promise<void> = Promise.resolve();
+        const enqueue = (task: () => Promise<void>): void => {
+            handlerQueue = handlerQueue
+                .then(task)
+                .catch((e) => logError("Error in edit history vault handler", e));
+        };
+        const processModify = async (fileOrFolder: TAbstractFile, force: boolean = false, enqueuedPath?: string, enqueuedMtime?: number) => {
             logInfo("vault modify", fileOrFolder.path);
             // This reports any files or folders modified via the api, ignore
             // non whitelisted files/folders
@@ -364,7 +380,19 @@ export default class EditHistory extends Plugin {
             }
 
             let file = fileOrFolder as TFile;
-            let zipFilepath = this.getEditHistoryFilepath(file.path);
+            // Edit time captured synchronously when this modify was enqueued, so
+            // a later modify that bumps file.stat.mtime before this runs can't
+            // retime this entry (the vault fires the callback synchronously, so
+            // the enqueue-time value is the edit's true mtime).
+            const mtime = enqueuedMtime ?? file.stat.mtime;
+            // Use the note path captured when this modify was enqueued, not the
+            // live file.path: a rename queued behind this modify mutates
+            // file.path before this runs, which would send the history file to
+            // the post-rename path and collide with the rename handler's move
+            // (leaving an orphan). The captured path keeps the history file
+            // where the note was when the edit happened; the rename handler then
+            // moves it to the new path.
+            let zipFilepath = this.getEditHistoryFilepath(enqueuedPath ?? file.path);
             let zipFile = this.app.vault.getAbstractFileByPath(zipFilepath);
             if ((zipFile != null) && !(zipFile instanceof TFile)) {
                 // Not a file, error
@@ -436,10 +464,10 @@ export default class EditHistory extends Plugin {
             //        unrelated edits when the app is closed before the timer
             //        expires. The timer needs to be per file/editor?
             //     See https://github.com/antoniotejada/obsidian-edit-history/issues/9
-            if (!force && 
-                (zipFile != null) && ((file.stat.mtime - zipFile.stat.mtime) < this.minMsBetweenEdits)) {
-                logDbg("Need to pass", 
-                    (this.minMsBetweenEdits - (file.stat.mtime - zipFile.stat.mtime)) / 1000, "s between edits, ignoring");
+            if (!force &&
+                (zipFile != null) && ((mtime - zipFile.stat.mtime) < this.minMsBetweenEdits)) {
+                logDbg("Need to pass",
+                    (this.minMsBetweenEdits - (mtime - zipFile.stat.mtime)) / 1000, "s between edits, ignoring");
                 return;
             }
 
@@ -477,7 +505,7 @@ export default class EditHistory extends Plugin {
 
             // Load the modified file data
             let fileData = await this.app.vault.read(file);
-            let newFilename = this.buildEditFilename(file.stat.mtime, false);
+            let newFilename = this.buildEditFilename(mtime, false);
 
             // Create or open the zip with the versions of this file
             let zip: JSZip = new JSZip();
@@ -675,9 +703,18 @@ export default class EditHistory extends Plugin {
             }
             // XXX This needs to update when switching panes, etc, or set a timer
             this.statusBarItemEl.setText((numEdits + 1) + " edits");
+        };
+        this.registerEvent(this.app.vault.on("modify", (fileOrFolder: TAbstractFile, force: boolean = false) => {
+            // Capture the path and edit time now, at enqueue time (the vault
+            // calls this callback synchronously), so a rename or later modify
+            // that lands before this one is dequeued can't redirect the history
+            // file or retime the entry.
+            const enqueuedPath = fileOrFolder.path;
+            const enqueuedMtime = (fileOrFolder instanceof TFile) ? fileOrFolder.stat.mtime : undefined;
+            enqueue(() => processModify(fileOrFolder, force, enqueuedPath, enqueuedMtime));
         }));
-        
-        this.registerEvent(this.app.vault.on("rename", (file: TAbstractFile, oldPath: string) => {
+
+        const processRename = async (file: TAbstractFile, oldPath: string) => {
             logInfo("vault rename path", file.path);
             // This reports any files or folders modified via the api, ignore
             // non whitelisted files/folders
@@ -729,11 +766,17 @@ export default class EditHistory extends Plugin {
             if (zipFile != null) {
                 let newZipFilepath = this.getEditHistoryFilepath(file.path);
                 logInfo("Renaming edit history file", zipFilepath,"to", newZipFilepath);
-                this.app.vault.rename(zipFile, newZipFilepath);
+                await this.app.vault.rename(zipFile, newZipFilepath);
             }
+        };
+        // oldPath is a stable string; file.path is read when the task runs but
+        // by then any earlier-enqueued modify has already flushed to the old
+        // path, so the history file exists to be moved
+        this.registerEvent(this.app.vault.on("rename", (file: TAbstractFile, oldPath: string) => {
+            enqueue(() => processRename(file, oldPath));
         }));
 
-        this.registerEvent(this.app.vault.on("delete", (file: TAbstractFile) => {
+        const processDelete = async (file: TAbstractFile) => {
             logInfo("vault delete path", file.path);
             // This reports any files or folders modified via the api, ignore
             // non whitelisted files/folders
@@ -749,8 +792,11 @@ export default class EditHistory extends Plugin {
                 // XXX Should this trash instead of delete? (the Obsidian
                 //     setting under Files and Links allows choosing between
                 //     system trash, obsidian trash and delete)
-                this.app.vault.delete(zipFile);
+                await this.app.vault.delete(zipFile);
             }
+        };
+        this.registerEvent(this.app.vault.on("delete", (file: TAbstractFile) => {
+            enqueue(() => processDelete(file));
         }));
 
         // XXX Use notices for some information/error messages
