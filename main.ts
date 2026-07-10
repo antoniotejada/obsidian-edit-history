@@ -362,7 +362,7 @@ export default class EditHistory extends Plugin {
                 .then(task)
                 .catch((e) => logError("Error in edit history vault handler", e));
         };
-        const processModify = async (fileOrFolder: TAbstractFile, force: boolean = false, enqueuedPath?: string) => {
+        const processModify = async (fileOrFolder: TAbstractFile, force: boolean = false, enqueuedPath?: string, enqueuedMtime?: number) => {
             logInfo("vault modify", fileOrFolder.path);
             // This reports any files or folders modified via the api, ignore
             // non whitelisted files/folders
@@ -380,6 +380,11 @@ export default class EditHistory extends Plugin {
             }
 
             let file = fileOrFolder as TFile;
+            // Edit time captured synchronously when this modify was enqueued, so
+            // a later modify that bumps file.stat.mtime before this runs can't
+            // retime this entry (the vault fires the callback synchronously, so
+            // the enqueue-time value is the edit's true mtime).
+            const mtime = enqueuedMtime ?? file.stat.mtime;
             // Use the note path captured when this modify was enqueued, not the
             // live file.path: a rename queued behind this modify mutates
             // file.path before this runs, which would send the history file to
@@ -459,10 +464,10 @@ export default class EditHistory extends Plugin {
             //        unrelated edits when the app is closed before the timer
             //        expires. The timer needs to be per file/editor?
             //     See https://github.com/antoniotejada/obsidian-edit-history/issues/9
-            if (!force && 
-                (zipFile != null) && ((file.stat.mtime - zipFile.stat.mtime) < this.minMsBetweenEdits)) {
-                logDbg("Need to pass", 
-                    (this.minMsBetweenEdits - (file.stat.mtime - zipFile.stat.mtime)) / 1000, "s between edits, ignoring");
+            if (!force &&
+                (zipFile != null) && ((mtime - zipFile.stat.mtime) < this.minMsBetweenEdits)) {
+                logDbg("Need to pass",
+                    (this.minMsBetweenEdits - (mtime - zipFile.stat.mtime)) / 1000, "s between edits, ignoring");
                 return;
             }
 
@@ -500,7 +505,7 @@ export default class EditHistory extends Plugin {
 
             // Load the modified file data
             let fileData = await this.app.vault.read(file);
-            let newFilename = this.buildEditFilename(file.stat.mtime, false);
+            let newFilename = this.buildEditFilename(mtime, false);
 
             // Create or open the zip with the versions of this file
             let zip: JSZip = new JSZip();
@@ -700,10 +705,13 @@ export default class EditHistory extends Plugin {
             this.statusBarItemEl.setText((numEdits + 1) + " edits");
         };
         this.registerEvent(this.app.vault.on("modify", (fileOrFolder: TAbstractFile, force: boolean = false) => {
-            // Capture the path now, at enqueue time, so a rename that lands
-            // before this modify is dequeued can't redirect the history file
+            // Capture the path and edit time now, at enqueue time (the vault
+            // calls this callback synchronously), so a rename or later modify
+            // that lands before this one is dequeued can't redirect the history
+            // file or retime the entry.
             const enqueuedPath = fileOrFolder.path;
-            enqueue(() => processModify(fileOrFolder, force, enqueuedPath));
+            const enqueuedMtime = (fileOrFolder instanceof TFile) ? fileOrFolder.stat.mtime : undefined;
+            enqueue(() => processModify(fileOrFolder, force, enqueuedPath, enqueuedMtime));
         }));
 
         const processRename = async (file: TAbstractFile, oldPath: string) => {
