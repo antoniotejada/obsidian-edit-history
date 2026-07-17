@@ -118,6 +118,7 @@ interface EditHistorySettings {
     editHistoryRootFolder: string;
     extensionWhitelist: string;
     substringBlacklist: string;
+    keepDeletedFileHistory: boolean;
     showOnStatusBar: boolean;
     diffDisplayFormat: string;
     showWhitespace: boolean;
@@ -133,6 +134,7 @@ const DEFAULT_SETTINGS: EditHistorySettings = {
     editHistoryRootFolder: "",
     extensionWhitelist: ".md, .txt, .csv, .htm, .html",
     substringBlacklist: "",
+    keepDeletedFileHistory: true,
     showOnStatusBar: true,
     diffDisplayFormat: DiffDisplayFormat.Inline,
     showWhitespace: true,
@@ -744,12 +746,22 @@ export default class EditHistory extends Plugin {
             // Delete the edit history file if any
             let zipFilepath = this.getEditHistoryFilepath(file.path);
             let zipFile = this.app.vault.getAbstractFileByPath(zipFilepath);
+            if (zipFile && this.settings.keepDeletedFileHistory) {
+                logDbg("Keeping history for deleted file", file.path);
+                const now = new Date();
+                const timestamp = now.getFullYear() +
+                    String(now.getMonth() + 1).padStart(2, "0") +
+                    String(now.getDate()).padStart(2, "0") +
+                    String(now.getHours()).padStart(2, "0") +
+                    String(now.getMinutes()).padStart(2, "0") +
+                    String(now.getSeconds()).padStart(2, "0");
+                zipFilepath = zipFilepath.replace(".edtz", `.${timestamp}.edtz`);
+                this.app.vault.rename(zipFile, zipFilepath);
+                return;
+            }            
             if (zipFile != null) {
                 logInfo("Deleting edit history file", zipFilepath);
-                // XXX Should this trash instead of delete? (the Obsidian
-                //     setting under Files and Links allows choosing between
-                //     system trash, obsidian trash and delete)
-                this.app.vault.delete(zipFile);
+                this.app.fileManager.trashFile(zipFile);
             }
         }));
 
@@ -1787,6 +1799,17 @@ class EditHistorySettingTab extends PluginSettingTab { plugin:
                         this.plugin.settings.substringBlacklist = value;
                         await this.plugin.saveSettings();
                     }));
+        
+        new Setting(containerEl)
+            .setName("Keep deleted file history")
+            .setDesc("Deleted files will keep their edit history even after deletion. Disable to delete the edit history file when the original file is deleted to reduce storage.")
+            .addToggle(toggle => toggle
+                .setValue(this.plugin.settings.keepDeletedFileHistory)
+                .onChange(async value => {
+                    logInfo("Keep deleted file history: " + value);
+                    this.plugin.settings.keepDeletedFileHistory = value;
+                    await this.plugin.saveSettings();
+                }));
 
         containerEl.createEl("h3", {text: "Appearance"});
         new Setting(containerEl)
